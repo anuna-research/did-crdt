@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>did:crdt — Interactive Demo</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d29922;
+    --purple: #bc8cff;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--sans); background: var(--bg); color: var(--text); line-height: 1.6; }
+
+  /* Header */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 1rem 2rem;
+    display: flex; align-items: center; gap: 1rem;
+  }
+  header h1 { font-family: var(--mono); font-size: 1.3rem; color: var(--accent); }
+  header span { color: var(--muted); font-size: 0.85rem; }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: 220px 1fr 1fr; height: calc(100vh - 57px); }
+
+  /* Steps nav */
+  .steps { border-right: 1px solid var(--border); padding: 1rem 0; overflow-y: auto; }
+  .steps h2 {
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); padding: 0.5rem 1rem 0.25rem;
+  }
+  .step-btn {
+    display: block; width: 100%; text-align: left; background: none; border: none;
+    color: var(--muted); padding: 0.45rem 1rem; font-size: 0.82rem;
+    font-family: var(--sans); cursor: pointer;
+    border-left: 3px solid transparent; transition: all 0.15s;
+  }
+  .step-btn:hover { background: rgba(88,166,255,0.08); color: var(--text); }
+  .step-btn.active { color: var(--accent); border-left-color: var(--accent); background: rgba(88,166,255,0.1); }
+  .step-btn.done { color: var(--green); }
+
+  /* Panels */
+  .panel { overflow-y: auto; padding: 1.25rem; }
+  .panel-left { border-right: 1px solid var(--border); }
+  .panel h2 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 0.75rem; }
+
+  /* Explanation */
+  .explanation {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.25rem;
+  }
+  .explanation h3 { font-size: 1rem; margin-bottom: 0.4rem; color: var(--accent); }
+  .explanation p { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.4rem; }
+  .explanation p:last-child { margin-bottom: 0; }
+  .tag {
+    display: inline-block; font-family: var(--mono); font-size: 0.7rem;
+    padding: 0.1rem 0.4rem; border-radius: 3px; margin-right: 0.2rem;
+  }
+  .tag-gset { background: rgba(63,185,80,0.15); color: var(--green); }
+  .tag-orset { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .tag-lww { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .tag-maxreg { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .tag-latch { background: rgba(248,81,73,0.15); color: var(--red); }
+
+  /* CRDT fields */
+  .crdt-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; margin-bottom: 1rem; }
+  .crdt-field {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.5rem 0.7rem;
+  }
+  .crdt-field.highlight { border-color: var(--accent); animation: pulse 0.5s ease; }
+  @keyframes pulse { 0%,100% { box-shadow: none; } 50% { box-shadow: 0 0 12px rgba(88,166,255,0.3); } }
+  .crdt-field .label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.15rem; }
+  .crdt-field .value { font-family: var(--mono); font-size: 0.72rem; color: var(--text); word-break: break-all; }
+  .crdt-field .value .empty { color: var(--muted); font-style: italic; }
+
+  /* Replica boxes */
+  .replicas { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem; }
+  .replica-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; }
+  .replica-box h4 { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.4rem; font-family: var(--mono); }
+  .replica-box.converged { border-color: var(--green); }
+  .replica-box .status { font-size: 0.7rem; font-family: var(--mono); margin-top: 0.4rem; }
+  .status-converged { color: var(--green); }
+  .status-diverged { color: var(--orange); }
+  .convergence-result { text-align: center; font-family: var(--mono); font-size: 0.85rem; margin-top: 0.5rem; }
+
+  /* JSON view */
+  .json-view {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 0.75rem; font-family: var(--mono); font-size: 0.72rem;
+    line-height: 1.45; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  .json-key { color: var(--accent); }
+  .json-str { color: var(--green); }
+  .json-num { color: var(--orange); }
+  .json-bool { color: var(--purple); }
+
+  /* Nav hint */
+  .nav-hint {
+    position: fixed; bottom: 1rem; right: 1.5rem;
+    font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.3rem 0.7rem;
+  }
+  .nav-hint kbd {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 3px; padding: 0 0.3rem; font-size: 0.7rem;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>did:crdt</h1>
+  <span>Coordination-Free Decentralised Identifiers via Signed CRDTs</span>
+</header>
+
+<div class="layout">
+  <nav class="steps" id="steps-nav"></nav>
+  <div class="panel panel-left" id="panel-left"></div>
+  <div class="panel panel-right" id="panel-right"></div>
+</div>
+
+<div class="nav-hint"><kbd>→</kbd> next &nbsp; <kbd>←</kbd> back</div>
+
+<script>
+// ── Simulation ────────────────────────────────────────────────────────────────
+
+function blake3Fake(input) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) { h ^= input.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  const hex = v => (v >>> 0).toString(16).padStart(8, '0');
+  return hex(h) + hex(h^0xdeadbeef) + hex(h^0xcafebabe) + hex(h^0x12345678) +
+         hex(h^0xfeedface) + hex(h^0xabcdef01) + hex(h^0x98765432) + hex(h^0x0badf00d);
+}
+
+class HLC {
+  constructor(nodeId) { this.wallMs = 1000; this.logical = 0; this.nodeId = nodeId; }
+  tick() { this.wallMs += Math.floor(Math.random()*500)+100; this.logical++; return { wallMs:this.wallMs, logical:this.logical, nodeId:this.nodeId }; }
+}
+
+class CRDTDocument {
+  constructor(name) {
+    this.name = name; this.did = null;
+    this.verificationMethods = new Map();
+    this.serviceEndpoints = new Map();
+    this.documentData = new Map();
+    this.activeKey = { seq:0, keyRef:null, keyHash:null };
+    this.revokedVerificationMethods = new Set();
+    this.revocations = new Set();
+    this.deactivated = false;
+    this.hlc = new HLC(name === 'Node A' ? 1 : 2);
+  }
+
+  static create(name, pubKey) {
+    const d = new CRDTDocument(name);
+    d.did = 'did:crdt:' + blake3Fake(JSON.stringify({ts:0,op:'AddVM',key:pubKey}));
+    const kid = d.did + '#key-0';
+    d.verificationMethods.set(kid, { id:kid, type:'Ed25519VerificationKey2020', publicKeyMultibase:pubKey });
+    d.hlc.tick();
+    return d;
+  }
+
+  applyDelta(delta) {
+    delta.ts = delta.ts || this.hlc.tick();
+    if (this.deactivated) return false;
+    if (!this.verificationMethods.has(delta.signer) && this.verificationMethods.size > 0) return false;
+    if (this.revokedVerificationMethods.has(delta.signer)) return false;
+    switch (delta.op) {
+      case 'AddVerificationMethod':
+        this.verificationMethods.set(delta.id, { id:delta.id, type:'Ed25519VerificationKey2020', publicKeyMultibase:delta.pub }); break;
+      case 'AddServiceEndpoint':
+        this.serviceEndpoints.set(delta.id, { id:delta.id, type:delta.svcType, endpoint:delta.endpoint }); break;
+      case 'SetDocumentData': {
+        const ex = this.documentData.get(delta.key);
+        if (!ex || delta.ts.wallMs > ex.ts.wallMs || (delta.ts.wallMs===ex.ts.wallMs && delta.ts.nodeId > ex.ts.nodeId))
+          this.documentData.set(delta.key, { value:delta.value, ts:delta.ts });
+        break;
+      }
+      case 'RotateKey': {
+        if (delta.seq <= this.activeKey.seq) return false;
+        this.activeKey = { seq:delta.seq, keyRef:delta.keyRef, keyHash:blake3Fake(delta.keyRef) }; break;
+      }
+      case 'RevokeVerificationMethod': this.revokedVerificationMethods.add(delta.keyId); break;
+      case 'RevokeCredential': this.revocations.add(delta.credId); break;
+      case 'Deactivate': this.deactivated = true; break;
+    }
+    return true;
+  }
+
+  mergeState(other) {
+    for (const [id,vm] of other.verificationMethods) if (!this.verificationMethods.has(id)) this.verificationMethods.set(id,vm);
+    for (const [id,s] of other.serviceEndpoints) if (!this.serviceEndpoints.has(id)) this.serviceEndpoints.set(id,s);
+    for (const [k,e] of other.documentData) {
+      const m = this.documentData.get(k);
+      if (!m || e.ts.wallMs > m.ts.wallMs || (e.ts.wallMs===m.ts.wallMs && e.ts.nodeId > m.ts.nodeId)) this.documentData.set(k,e);
+    }
+    if (other.activeKey.seq > this.activeKey.seq || (other.activeKey.seq===this.activeKey.seq && (other.activeKey.keyHash||'') > (this.activeKey.keyHash||'')))
+      this.activeKey = {...other.activeKey};
+    for (const k of other.revokedVerificationMethods) this.revokedVerificationMethods.add(k);
+    for (const r of other.revocations) this.revocations.add(r);
+    this.deactivated = this.deactivated || other.deactivated;
+  }
+
+  resolve() {
+    const revokedSet = this.revokedVerificationMethods;
+    const sVMs = [...this.verificationMethods.values()].filter(vm=>!revokedSet.has(vm.id)).sort((a,b)=>a.id.localeCompare(b.id));
+    const sSvcs = [...this.serviceEndpoints.values()].sort((a,b)=>a.id.localeCompare(b.id));
+    const sData = [...this.documentData.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+    const sRevs = [...this.revocations].sort();
+    const sRevokedVMs = [...this.revokedVerificationMethods].sort();
+    const doc = {
+      '@context': ['https://www.w3.org/ns/did/v1','https://w3id.org/security/suites/ed25519-2020/v1'],
+      id: this.did,
+      verificationMethod: sVMs.map(vm=>({id:vm.id,type:vm.type,controller:this.did,publicKeyMultibase:vm.publicKeyMultibase})),
+      authentication: sVMs.map(vm=>vm.id),
+      service: sSvcs.map(s=>({id:s.id,type:s.type,serviceEndpoint:s.endpoint})),
+      didDocumentMetadata: {
+        deactivated: this.deactivated,
+        versionId: blake3Fake(JSON.stringify({
+          vm:sVMs.map(v=>v.id), svc:sSvcs.map(s=>s.id+s.endpoint),
+          data:sData.map(([k,v])=>k+JSON.stringify(v.value)),
+          key:this.activeKey.seq+':'+(this.activeKey.keyRef||''), rev:sRevs, revokedVMs:sRevokedVMs, deact:this.deactivated
+        }))
+      }
+    };
+    for (const [k,v] of sData) doc[k] = v.value;
+    return doc;
+  }
+
+  versionId() { return this.resolve().didDocumentMetadata.versionId.slice(0,16)+'…'; }
+}
+
+// ── Steps ─────────────────────────────────────────────────────────────────────
+
+let nodeA, nodeB;
+
+const STEPS = [
+  // ── ACT 1: THE IDEA ──
+  {
+    section: 'The Idea',
+    id: 'genesis', title: 'Create a DID — no blockchain',
+    explanation: {
+      title: 'Identity as a CRDT',
+      body: `<p>No existing DID method achieves all four: zero coordination, offline mutation, cryptographic auth, and W3C compliance.</p>
+      <table style="width:100%;font-size:0.8rem;border-collapse:collapse;margin:0.5rem 0">
+        <tr style="border-bottom:1px solid var(--border);color:var(--muted)">
+          <th style="text-align:left;padding:0.25rem 0.5rem">Method</th><th>Update</th><th>Coord.</th><th>Fees</th><th>Offline</th>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:0.2rem 0.5rem;font-family:var(--mono)">did:key</td><td style="text-align:center">Static</td><td style="text-align:center">None</td><td style="text-align:center">No</td><td style="text-align:center">N/A</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:0.2rem 0.5rem;font-family:var(--mono)">did:peer</td><td style="text-align:center">Static</td><td style="text-align:center">None</td><td style="text-align:center">No</td><td style="text-align:center">N/A</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:0.2rem 0.5rem;font-family:var(--mono)">did:ethr</td><td style="text-align:center">Chain tx</td><td style="text-align:center">Global</td><td style="text-align:center">Yes</td><td style="text-align:center">No</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:0.2rem 0.5rem;font-family:var(--mono)">Sidetree</td><td style="text-align:center">Delta+anchor</td><td style="text-align:center">Chain</td><td style="text-align:center">Yes</td><td style="text-align:center">Partial</td></tr>
+        <tr style="color:var(--accent);font-weight:600"><td style="padding:0.2rem 0.5rem;font-family:var(--mono)">did:crdt</td><td style="text-align:center">CRDT</td><td style="text-align:center">None</td><td style="text-align:center">No</td><td style="text-align:center">Yes</td></tr>
+      </table>
+      <p><strong>did:crdt</strong> maps each document field to a CRDT whose merge is monotone. The <strong>CALM theorem</strong> guarantees that state-based merge converges without coordination. The delta path requires causal delivery — but the end state is always the same.</p>
+      <p>The DID is a <strong>BLAKE3 hash</strong> of the genesis delta — no registry, no fees, no network.</p>`
+    },
+    run() {
+      nodeA = CRDTDocument.create('Node A', 'z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK');
+      // Build up a realistic document
+      nodeA.applyDelta({ op:'AddVerificationMethod', id:nodeA.did+'#key-1', pub:'z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WkT8Z6Mqd2F', signer:nodeA.did+'#key-0' });
+      nodeA.applyDelta({ op:'AddServiceEndpoint', id:nodeA.did+'#svc-msg', svcType:'DIDCommMessaging', endpoint:'https://relay.example.com/msg', signer:nodeA.did+'#key-0' });
+      nodeA.applyDelta({ op:'RotateKey', seq:1, keyRef:nodeA.did+'#key-1', signer:nodeA.did+'#key-0' });
+      // Clone to nodeB
+      nodeB = CRDTDocument.create('Node B', 'z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK');
+      nodeB.did = nodeA.did;
+      nodeB.verificationMethods = new Map(nodeA.verificationMethods);
+      nodeB.serviceEndpoints = new Map(nodeA.serviceEndpoints);
+      nodeB.documentData = new Map(nodeA.documentData);
+      nodeB.activeKey = {...nodeA.activeKey};
+      nodeB.revokedVerificationMethods = new Set(nodeA.revokedVerificationMethods);
+      nodeB.revocations = new Set(nodeA.revocations);
+      nodeB.hlc = new HLC(2);
+      return { mode:'single', doc:nodeA };
+    }
+  },
+
+  // ── ACT 2: RESOLUTION ──
+  {
+    section: 'Resolution',
+    id: 'resolution', title: 'resolve() — pure local projection',
+    explanation: {
+      title: 'No Network Required',
+      body: `<p>DID resolution is a <strong>pure function</strong>: project the seven CRDT fields into a W3C DID Core JSON-LD document. No RPC call, no chain read, no registry lookup.</p>
+      <p><strong>&lt;1ms</strong> even for 100-key documents — four orders of magnitude faster than <code>did:ethr</code> (~12s on-chain read).</p>
+      <p>Three discovery modes feed deltas into this local state:</p>
+      <p><strong>1. Owner-presented:</strong> DID owner hands <code>(did, [δ₀…δₙ])</code> directly to the relying party — like <code>did:peer</code>, but updatable.<br>
+      <strong>2. Gossip/DHT:</strong> Nodes subscribe to a topic per DID via iroh (QUIC + NAT hole-punching). Essential for third-party verification when the owner is absent.<br>
+      <strong>3. Out-of-band:</strong> QR code, NFC, Bluetooth, USB — no internet at any point.</p>
+      <p>The resolver doesn't care <em>how</em> deltas arrived. CRDT merge is order-independent and idempotent — any delivery path produces the same document.</p>
+      <p style="color:var(--orange);font-size:0.8rem"><strong>Caveat:</strong> First-contact resolution via DHT adds network latency (~1-2s). If no peer is online for a given DID, resolution blocks until one appears. The &lt;1ms figure is local projection only.</p>`
+    },
+    run() {
+      return { mode:'single', doc:nodeA };
+    }
+  },
+
+  // ── ACT 3: THE PROOF ──
+  {
+    section: 'The Proof',
+    id: 'partition', title: 'Two replicas, network partition',
+    explanation: {
+      title: 'Offline, Independent Mutations',
+      body: `<p>Two devices hold the same DID. They go offline — different networks, different continents.</p>
+      <p><strong>Node A</strong> adds a blog endpoint, sets location, revokes a credential.<br>
+      <strong>Node B</strong> adds a Mastodon endpoint, sets a bio, rotates the controller key.</p>
+      <p>Neither knows about the other's changes. The version IDs diverge.</p>
+      <p>On a blockchain, this can't happen — you're blocked until online. With <code>did:peer</code>, the document is frozen at creation. Here, both devices keep working.</p>`
+    },
+    run() {
+      // Node A: offline edits
+      nodeA.applyDelta({ op:'AddServiceEndpoint', id:nodeA.did+'#svc-blog', svcType:'LinkedDomains', endpoint:'https://alice.blog', signer:nodeA.did+'#key-0' });
+      nodeA.applyDelta({ op:'SetDocumentData', key:'location', value:'Dublin', signer:nodeA.did+'#key-0' });
+      nodeA.applyDelta({ op:'RevokeCredential', credId:'urn:uuid:a1b2c3d4-dead-beef', signer:nodeA.did+'#key-0' });
+      // Node B: different offline edits
+      nodeB.applyDelta({ op:'AddServiceEndpoint', id:nodeB.did+'#svc-social', svcType:'LinkedDomains', endpoint:'https://mastodon.social/@alice', signer:nodeB.did+'#key-1' });
+      nodeB.applyDelta({ op:'SetDocumentData', key:'bio', value:'Distributed systems researcher', signer:nodeB.did+'#key-1' });
+      nodeB.applyDelta({ op:'RotateKey', seq:2, keyRef:nodeB.did+'#key-0', signer:nodeB.did+'#key-1' });
+      return { mode:'replicas', phase:'partitioned' };
+    }
+  },
+  {
+    id: 'merge', title: 'Merge → identical state',
+    explanation: {
+      title: 'Convergence Without Coordination',
+      body: `<p>The partition heals. Both replicas exchange state via <code>merge_state()</code>.</p>
+      <p>Each CRDT field merges independently:<br>
+      <span class="tag tag-gset">G-Set</span> union (×2 for 2P-Set keys) &nbsp;
+      <span class="tag tag-orset">OR-Set</span> add-wins &nbsp;
+      <span class="tag tag-lww">LWW-Map</span> highest HLC &nbsp;
+      <span class="tag tag-maxreg">Max-Reg</span> max seq &nbsp;
+      <span class="tag tag-latch">Latch</span> OR</p>
+      <p><strong>Both replicas now have identical version IDs.</strong> Every concurrent conflict has a deterministic resolution:</p>
+      <table style="width:100%;font-size:0.78rem;border-collapse:collapse;margin:0.5rem 0">
+        <tr style="border-bottom:1px solid var(--border);color:var(--muted)">
+          <th style="text-align:left;padding:0.2rem 0.4rem">Conflict</th><th style="text-align:left;padding:0.2rem 0.4rem">Resolution</th>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:0.2rem 0.4rem">Both add different endpoints</td><td style="padding:0.2rem 0.4rem">Both survive (OR-Set union)</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:0.2rem 0.4rem">Concurrent add &amp; remove</td><td style="padding:0.2rem 0.4rem">Add wins (ORSWOT)</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:0.2rem 0.4rem">Two RotateKey at same seq</td><td style="padding:0.2rem 0.4rem">Greater BLAKE3(key) wins</td></tr>
+        <tr style="border-bottom:1px solid var(--border)"><td style="padding:0.2rem 0.4rem">Two writes to same metadata key</td><td style="padding:0.2rem 0.4rem">Greater HLC wins; node_id tiebreak</td></tr>
+        <tr><td style="padding:0.2rem 0.4rem">Deactivate + any update</td><td style="padding:0.2rem 0.4rem">Latch wins (boolean OR)</td></tr>
+      </table>
+      <p>No consensus round. No human intervention. The math guarantees it.</p>`
+    },
+    run() {
+      nodeA.mergeState(nodeB);
+      nodeB.mergeState(nodeA);
+      return { mode:'replicas', phase:'converged' };
+    }
+  },
+
+  // ── ACT 4: TRADE-OFFS ──
+  {
+    section: 'Trade-offs',
+    id: 'tradeoff-key', title: '2P-Set key revocation',
+    explanation: {
+      title: '2P-Set — Revoke Compromised Keys',
+      body: `<p>Alice rotated from <code>#key-0</code> to <code>#key-1</code>. The old key is still in the add-set — but now she can <strong>revoke it</strong> by inserting it into the revoke-set.</p>
+      <p>Verification methods form a <strong>2P-Set</strong> (two-phase set): two G-Sets where <code>authorized = added ∖ revoked</code>. Both halves are grow-only and monotone, so CRDT convergence is preserved.</p>
+      <p style="color:var(--green)">Watch: <code>#key-0</code> is revoked. The attacker's attempt to add a rogue endpoint is <strong>rejected</strong>.</p>
+      <p style="color:var(--orange)"><strong>Trade-off:</strong> Revocation is irreversible — a key added to the revoke G-Set can never be re-authorized. This is the cost of monotonicity.</p>
+      <p><strong>Future work:</strong> M-of-N threshold for sensitive operations like Deactivate or revoking the controller key.</p>`
+    },
+    run() {
+      // Revoke the old key
+      nodeA.applyDelta({ op:'RevokeVerificationMethod', keyId:nodeA.did+'#key-0', signer:nodeA.did+'#key-1' });
+      // Attacker tries to use the revoked key — this is now rejected
+      const result = nodeA.applyDelta({ op:'AddServiceEndpoint', id:nodeA.did+'#svc-rogue', svcType:'Malicious', endpoint:'https://evil.example.com', signer:nodeA.did+'#key-0' });
+      return { mode:'single', doc:nodeA };
+    }
+  },
+  {
+    id: 'tradeoff-lww', title: 'LWW silently drops writes',
+    explanation: {
+      title: 'Last Writer Wins — Losers Disappear',
+      body: `<p>Node A sets <code>displayName: "Alice"</code>. Node B concurrently sets <code>displayName: "Alice O'Connor"</code>. Both are valid writes to the same key.</p>
+      <p>After merge, <strong>only the higher-HLC write survives</strong>. The other is silently discarded. No error, no conflict marker, no trace it ever existed.</p>
+      <p style="color:var(--orange)">This is inherent to LWW semantics — the trade-off for deterministic, coordination-free resolution.</p>
+      <p><strong>Guidance:</strong> Use distinct keys for data that shouldn't collide. Use the OR-Set field for data where both values should survive.</p>`
+    },
+    run() {
+      // Simulate LWW conflict — both write to same key
+      nodeA.applyDelta({ op:'SetDocumentData', key:'displayName', value:'Alice', signer:nodeA.did+'#key-1' });
+      // nodeB writes with a higher timestamp — it wins
+      const laterTs = { wallMs: nodeA.hlc.wallMs + 5000, logical: 99, nodeId: 2 };
+      nodeA.applyDelta({ op:'SetDocumentData', key:'displayName', value:"Alice O'Connor", signer:nodeA.did+'#key-1', ts: laterTs });
+      return { mode:'single', doc:nodeA };
+    }
+  },
+
+  // ── ACT 5: WHY IT MATTERS ──
+  {
+    section: 'Why It Matters',
+    id: 'conclusion', title: 'Zero cost, Byzantine-safe, offline',
+    explanation: {
+      title: 'What This Gives You',
+      body: `<p><strong>vs. blockchain DIDs:</strong> Zero fees, sub-millisecond resolution, works offline. Even at realistic rotation intervals — weekly for 10K devices — blockchain gas costs $2.6M–$26M/year. At IoT-scale rotation (every minute), $2.6B/year. did:crdt handles both on a $20/month node.</p>
+      <p><strong>vs. did:peer:</strong> Same out-of-band model (owner presents deltas directly), <em>plus</em> live updateability, multi-device convergence, and third-party resolution via gossip/DHT.</p>
+      <p><strong>Byzantine fault tolerance:</strong> Only non-revoked keys in the 2P-Set can sign deltas. This is a deterministic validity check — all replicas agree on accept/reject. Tolerates <em>any number</em> of Byzantine nodes (no 2/3 honest requirement). Immune to Sybil attacks.</p>
+      <p><strong>Implementation:</strong> 2,600 lines of Rust, zero unsafe, compiles to WASM. Ten property-based proofs of convergence (including 2P-Set commutativity, monotonicity, and idempotence). Ed25519 + secp256k1.</p>`
+    },
+    run() {
+      nodeA.mergeState(nodeB);
+      nodeB.mergeState(nodeA);
+      return { mode:'replicas', phase:'converged' };
+    }
+  }
+];
+
+// ── Rendering ─────────────────────────────────────────────────────────────────
+
+let currentStep = -1;
+
+function renderNav() {
+  const nav = document.getElementById('steps-nav');
+  nav.innerHTML = '';
+  let lastSection = '';
+  STEPS.forEach((step, i) => {
+    if (step.section && step.section !== lastSection) {
+      const h2 = document.createElement('h2');
+      h2.textContent = step.section;
+      nav.appendChild(h2);
+      lastSection = step.section;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'step-btn' + (i===currentStep?' active':'') + (i<currentStep?' done':'');
+    btn.textContent = step.title;
+    btn.onclick = () => goToStep(i);
+    nav.appendChild(btn);
+  });
+}
+
+function syntaxJSON(obj) {
+  return JSON.stringify(obj, null, 2)
+    .replace(/("(?:\\.|[^"\\])*")\s*:/g, (m,k) => `<span class="json-key">${k}</span>:`)
+    .replace(/:\s*("(?:\\.|[^"\\])*")/g, (m,v) => ': <span class="json-str">'+v+'</span>')
+    .replace(/:\s*(\d+(?:\.\d+)?)/g, (m,v) => ': <span class="json-num">'+v+'</span>')
+    .replace(/:\s*(true|false)/g, (m,v) => ': <span class="json-bool">'+v+'</span>');
+}
+
+function shortId(id) {
+  if (!id) return '—';
+  const h = id.indexOf('#');
+  if (h >= 0) return id.slice(h);
+  if (id.startsWith('did:crdt:')) return 'did:crdt:'+id.slice(9,17)+'…';
+  return id.slice(0,20)+'…';
+}
+
+function renderCRDT(d, hl=[]) {
+  const h = f => hl.includes(f) ? ' highlight' : '';
+  const vms = [...d.verificationMethods.keys()].sort().map(shortId).join(', ') || '<span class="empty">∅</span>';
+  const revokedVMs = [...d.revokedVerificationMethods].sort().map(shortId).join(', ') || '<span class="empty">∅</span>';
+  const svcs = [...d.serviceEndpoints.values()].sort((a,b)=>a.id.localeCompare(b.id)).map(s=>shortId(s.id)).join(', ') || '<span class="empty">∅</span>';
+  const data = [...d.documentData.entries()].sort((a,b)=>a[0].localeCompare(b[0])).map(([k,v])=>`${k}: "${v.value}"`).join(', ') || '<span class="empty">∅</span>';
+  const active = d.activeKey.keyRef ? `${shortId(d.activeKey.keyRef)} (seq ${d.activeKey.seq})` : '<span class="empty">none</span>';
+  const revs = [...d.revocations].sort().map(r=>r.slice(0,16)+'…').join(', ') || '<span class="empty">∅</span>';
+  const deact = d.deactivated ? '<span style="color:var(--red)">true</span>' : 'false';
+  return `<div class="crdt-fields">
+    <div class="crdt-field${h('vm')}"><div class="label"><span class="tag tag-gset">G-Set</span> Keys (add)</div><div class="value">${vms}</div></div>
+    <div class="crdt-field${h('rvm')}"><div class="label"><span class="tag tag-gset">G-Set</span> Keys (revoke)</div><div class="value">${revokedVMs}</div></div>
+    <div class="crdt-field${h('svc')}"><div class="label"><span class="tag tag-orset">OR-Set</span> Services</div><div class="value">${svcs}</div></div>
+    <div class="crdt-field${h('data')}"><div class="label"><span class="tag tag-lww">LWW-Map</span> Metadata</div><div class="value">${data}</div></div>
+    <div class="crdt-field${h('key')}"><div class="label"><span class="tag tag-maxreg">Max-Reg</span> Controller</div><div class="value">${active}</div></div>
+    <div class="crdt-field${h('rev')}"><div class="label"><span class="tag tag-gset">G-Set</span> Revocations</div><div class="value">${revs}</div></div>
+    <div class="crdt-field${h('deact')}"><div class="label"><span class="tag tag-latch">Latch</span> Deactivated</div><div class="value">${deact}</div></div>
+  </div>`;
+}
+
+function renderSingle(result) {
+  const left = document.getElementById('panel-left');
+  const right = document.getElementById('panel-right');
+  const step = STEPS[currentStep];
+  left.innerHTML = `
+    <h2>Explanation</h2>
+    <div class="explanation"><h3>${step.explanation.title}</h3>${step.explanation.body}</div>
+    <h2>CRDT State — 7 Fields</h2>
+    ${renderCRDT(result.doc)}`;
+  right.innerHTML = `
+    <h2>Resolved W3C DID Document</h2>
+    <div class="json-view">${syntaxJSON(result.doc.resolve())}</div>`;
+}
+
+function renderReplicas(result) {
+  const left = document.getElementById('panel-left');
+  const right = document.getElementById('panel-right');
+  const step = STEPS[currentStep];
+  const conv = result.phase === 'converged';
+  const vA = nodeA.versionId(), vB = nodeB.versionId();
+  const match = vA === vB;
+
+  left.innerHTML = `
+    <h2>Explanation</h2>
+    <div class="explanation"><h3>${step.explanation.title}</h3>${step.explanation.body}</div>
+    <h2>Replica Comparison</h2>
+    <div class="replicas">
+      <div class="replica-box${conv?' converged':''}">
+        <h4>Node A</h4>${renderCRDT(nodeA)}
+        <div class="status ${match?'status-converged':'status-diverged'}">version: ${vA}</div>
+      </div>
+      <div class="replica-box${conv?' converged':''}">
+        <h4>Node B</h4>${renderCRDT(nodeB)}
+        <div class="status ${match?'status-converged':'status-diverged'}">version: ${vB}</div>
+      </div>
+    </div>
+    <div class="convergence-result" style="color:var(--${match?'green':'orange'})">
+      ${match ? '✓ Converged — identical version IDs' : '⚠ Diverged — different version IDs'}
+    </div>`;
+
+  right.innerHTML = `
+    <h2>Node A — Resolved Document</h2>
+    <div class="json-view" style="margin-bottom:1rem">${syntaxJSON(nodeA.resolve())}</div>
+    <h2>Node B — Resolved Document</h2>
+    <div class="json-view">${syntaxJSON(nodeB.resolve())}</div>`;
+}
+
+const stepResults = [];
+function goToStep(i) {
+  if (i < 0 || i >= STEPS.length) return;
+  nodeA = null; nodeB = null; stepResults.length = 0;
+  for (let s = 0; s <= i; s++) stepResults[s] = STEPS[s].run();
+  currentStep = i;
+  renderNav();
+  const r = stepResults[i];
+  if (r.mode === 'single') renderSingle(r);
+  else renderReplicas(r);
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key==='ArrowRight'||e.key==='ArrowDown'||e.key===' ') { e.preventDefault(); goToStep(currentStep+1); }
+  else if (e.key==='ArrowLeft'||e.key==='ArrowUp') { e.preventDefault(); goToStep(currentStep-1); }
+});
+
+renderNav();
+goToStep(0);
+</script>
+</body>
+</html>

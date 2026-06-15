@@ -1,0 +1,3 @@
+[target.wasm32-unknown-unknown]
+# blake3 uses cc for native SIMD; on wasm32 it automatically falls back to the
+# portable pure-Rust path, so no extra linker or runner flags are required.

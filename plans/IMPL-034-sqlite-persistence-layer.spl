@@ -1,0 +1,172 @@
+;; Plan: Implement SPEC-034 SQLite persistence layer
+(meta plan
+  (id "IMPL-034")
+  (title "SQLite Persistence Layer")
+  (version "1.0.0")
+  (status "active")
+  (created "2026-04-23")
+  (author "agent:codex")
+  (spec "SPEC-034")
+  (description "Implement SQLite-backed durable storage for the did-crdt HTTP service while preserving the pure core and memory-backed service mode."))
+
+;; Agents
+(given agent-core-available)
+(given agent-service-available)
+(given agent-storage-available)
+(given agent-test-available)
+(given agent-observability-available)
+(given agent-docs-available)
+
+;; Tasks
+(given task-store-abstraction-memory-parity)
+(given task-storage-sqlite-feature-dependencies)
+(given task-state-delta-codecs)
+(given task-sqlite-schema-migrations)
+(given task-sqlite-store-transactions)
+(given task-service-startup-configuration)
+(given task-http-store-integration)
+(given task-delta-rebuild-integrity-backup)
+(given task-storage-observability)
+(given task-persistence-test-suite)
+(given task-saturation-benchmarks-docs)
+
+;; Dependencies
+(given no-deps-store-abstraction-memory-parity)
+(given no-deps-storage-sqlite-feature-dependencies)
+
+;; Task metadata
+(meta task-store-abstraction-memory-parity
+  (description "Introduce src/service/store with DocumentStore, health, stats, delta listing types, storage errors, and a MemoryStore that preserves current Arc<RwLock<HashMap<...>>> behavior behind the trait.")
+  (acceptance "CON-005 and REQ-043 are represented in service/store; HTTP handlers can be moved to Arc<dyn DocumentStore>; existing service behavior and tests pass without the storage-sqlite feature."))
+
+(meta task-storage-sqlite-feature-dependencies
+  (description "Add the optional storage-sqlite Cargo feature and SQLite/codec/hash dependencies without changing default pure-core builds.")
+  (acceptance "cargo build --no-default-features and cargo build --features service both avoid SQLite dependencies; cargo build --features service,storage-sqlite enables the persistent backend dependencies."))
+
+(meta task-state-delta-codecs
+  (description "Implement canonical full SignedDelta bytes plus BLAKE3 hashing and a versioned deterministic binary DocumentStateV1 envelope for merge-sufficient CRDT state.")
+  (acceptance "CON-009 is implemented; state roundtrips preserve resolve output and future merge behavior; TEST-052 coverage includes OR-Set internals and actor-keyed causal context."))
+
+(meta task-sqlite-schema-migrations
+  (description "Implement SQLite open, required pragmas, schema_migrations, store_metadata, documents, deltas, snapshots, indexes, user_version, and forward-only migration validation.")
+  (acceptance "CON-006 and CON-008 schema requirements are applied atomically; TEST-045 passes for empty/current/future schema fixtures; startup fails safely on migration errors."))
+
+(meta task-sqlite-store-transactions
+  (description "Implement SqliteStore create_document, get_document, admit_delta, health, and stats using BEGIN IMMEDIATE transactions, duplicate delta detection, state hashing, and fail-closed integrity checks.")
+  (acceptance "REQ-036 through REQ-039 are satisfied; create and delta acknowledgement happen only after commit; duplicate deltas are idempotent; TEST-039 through TEST-042 pass."))
+
+(meta task-service-startup-configuration
+  (description "Wire DID_CRDT_STORAGE, STORAGE_PATH, SQLITE_SYNCHRONOUS, SQLITE_BUSY_TIMEOUT_MS, SQLITE_CACHE_SIZE_KIB, SQLITE_AUTO_MIGRATE, and SQLITE_INTEGRITY_CHECK_ON_START into service startup.")
+  (acceptance "CON-008 and REQ-046 are enforced; explicit SQLite configuration never silently falls back to memory; TEST-051 covers missing path, unwritable path, and default memory mode."))
+
+(meta task-http-store-integration
+  (description "Route POST /dids, GET /{did}, POST /dids/{did}/deltas, and GET /metrics through the store abstraction with a blocking boundary around SQLite work.")
+  (acceptance "CON-010 and ADR-009 are implemented; handlers do not know concrete backend type; existing CON-003 HTTP tests pass against memory and SQLite stores via TEST-050."))
+
+(meta task-delta-rebuild-integrity-backup
+  (description "Implement list_deltas, rebuild_document, explicit integrity verification, snapshot compatibility, and documented SQLite online backup/restore procedures.")
+  (acceptance "REQ-040, REQ-041, REQ-044, and REQ-045 are satisfied; TEST-043, TEST-044, TEST-048, and TEST-049 pass; corrupt state is not served silently."))
+
+(meta task-storage-observability
+  (description "Expose OBS-007 through OBS-013 metrics for document/delta counts, write/read latency, database and WAL size, cache size, storage errors, rebuild latency, and integrity failures.")
+  (acceptance "GET /metrics includes backend-labelled storage metrics in SQLite mode; storage errors and integrity failures increment counters; metric names match SPEC-034 observability contracts."))
+
+(meta task-persistence-test-suite
+  (description "Add integration, property, fault-injection, and HTTP compatibility tests for persistence, transactions, duplicate handling, rebuild, migration, startup failures, and codec behavior.")
+  (acceptance "TEST-039 through TEST-052 are represented by focused tests or benchmark harnesses; cargo test --features service,storage-sqlite passes; cargo test without storage-sqlite still passes."))
+
+(meta task-saturation-benchmarks-docs
+  (description "Extend the saturation harness and operator documentation to measure SQLite-backed create throughput, delta throughput, point lookup latency, memory use, disk bytes, WAL bytes, backup/restore, and bytes per DID.")
+  (acceptance "TEST-046 and TEST-047 produce repeatable cheap-node capacity numbers; README or operator docs document SQLite configuration, backup/restore, and benchmark interpretation."))
+
+;; Readiness and assignment rules
+(claims agent:codex
+  :at "2026-04-23T00:00:00Z"
+  :note "Initial task graph derived from SPEC-034."
+  (normally r-ready-store-abstraction-memory-parity
+  (and task-store-abstraction-memory-parity no-deps-store-abstraction-memory-parity)
+  ready-store-abstraction-memory-parity)
+
+  (normally r-ready-storage-sqlite-feature-dependencies
+  (and task-storage-sqlite-feature-dependencies no-deps-storage-sqlite-feature-dependencies)
+  ready-storage-sqlite-feature-dependencies)
+
+  (normally r-ready-state-delta-codecs
+  (and task-state-delta-codecs completed-storage-sqlite-feature-dependencies)
+  ready-state-delta-codecs)
+
+  (normally r-ready-sqlite-schema-migrations
+  (and task-sqlite-schema-migrations completed-storage-sqlite-feature-dependencies)
+  ready-sqlite-schema-migrations)
+
+  (normally r-ready-sqlite-store-transactions
+  (and task-sqlite-store-transactions completed-store-abstraction-memory-parity completed-state-delta-codecs completed-sqlite-schema-migrations)
+  ready-sqlite-store-transactions)
+
+  (normally r-ready-service-startup-configuration
+  (and task-service-startup-configuration completed-sqlite-schema-migrations)
+  ready-service-startup-configuration)
+
+  (normally r-ready-http-store-integration
+  (and task-http-store-integration completed-store-abstraction-memory-parity completed-sqlite-store-transactions completed-service-startup-configuration)
+  ready-http-store-integration)
+
+  (normally r-ready-delta-rebuild-integrity-backup
+  (and task-delta-rebuild-integrity-backup completed-sqlite-store-transactions completed-state-delta-codecs)
+  ready-delta-rebuild-integrity-backup)
+
+  (normally r-ready-storage-observability
+  (and task-storage-observability completed-store-abstraction-memory-parity completed-sqlite-store-transactions)
+  ready-storage-observability)
+
+  (normally r-ready-persistence-test-suite
+  (and task-persistence-test-suite completed-http-store-integration completed-delta-rebuild-integrity-backup completed-storage-observability)
+  ready-persistence-test-suite)
+
+  (normally r-ready-saturation-benchmarks-docs
+  (and task-saturation-benchmarks-docs completed-persistence-test-suite)
+  ready-saturation-benchmarks-docs)
+
+  (normally r-assign-store-abstraction-memory-parity-service
+  (and ready-store-abstraction-memory-parity agent-service-available)
+  assign-to-store-abstraction-memory-parity-service)
+
+  (normally r-assign-storage-sqlite-feature-dependencies-storage
+  (and ready-storage-sqlite-feature-dependencies agent-storage-available)
+  assign-to-storage-sqlite-feature-dependencies-storage)
+
+  (normally r-assign-state-delta-codecs-core
+  (and ready-state-delta-codecs agent-core-available)
+  assign-to-state-delta-codecs-core)
+
+  (normally r-assign-sqlite-schema-migrations-storage
+  (and ready-sqlite-schema-migrations agent-storage-available)
+  assign-to-sqlite-schema-migrations-storage)
+
+  (normally r-assign-sqlite-store-transactions-storage
+  (and ready-sqlite-store-transactions agent-storage-available)
+  assign-to-sqlite-store-transactions-storage)
+
+  (normally r-assign-service-startup-configuration-service
+  (and ready-service-startup-configuration agent-service-available)
+  assign-to-service-startup-configuration-service)
+
+  (normally r-assign-http-store-integration-service
+  (and ready-http-store-integration agent-service-available)
+  assign-to-http-store-integration-service)
+
+  (normally r-assign-delta-rebuild-integrity-backup-storage
+  (and ready-delta-rebuild-integrity-backup agent-storage-available)
+  assign-to-delta-rebuild-integrity-backup-storage)
+
+  (normally r-assign-storage-observability-observability
+  (and ready-storage-observability agent-observability-available)
+  assign-to-storage-observability-observability)
+
+  (normally r-assign-persistence-test-suite-test
+  (and ready-persistence-test-suite agent-test-available)
+  assign-to-persistence-test-suite-test)
+
+  (normally r-assign-saturation-benchmarks-docs-docs
+  (and ready-saturation-benchmarks-docs agent-docs-available)
+  assign-to-saturation-benchmarks-docs-docs))

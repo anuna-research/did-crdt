@@ -1,0 +1,1170 @@
+;; Plan metadata
+(meta plan
+  (id "SPEC-032")
+  (title "did-crdt — Coordination-Free Decentralised Identifiers via Signed CRDTs")
+  (version "0.1.0")
+  (status "draft")
+  (created "2026-03-10")
+  (author "agent:architect")
+  (spec "SPEC-031")
+  (description "Implement did:crdt — a W3C-compliant DID method using signed CRDTs for coordination-free convergence across replicas"))
+
+;; Agents
+(given agent-engineer-available)
+(given agent-security-available)
+(given agent-devops-available)
+
+;; ─── PHASE 1: PURE CORE ───────────────────────────────────────────────────
+
+;; Tasks
+(given task-scaffold-crate)
+(given task-crdt-field-wrappers)
+(given task-document-struct)
+(given task-signed-delta)
+(given task-hlc)
+(given task-validate)
+(given task-resolve)
+(given task-did-type)
+(given task-proptest-merge)
+(given task-proptest-rotation)
+(given task-proptest-deactivation)
+(given task-benchmark-core)
+(given task-forbid-unsafe-core)
+
+;; No-dependency seeds
+(given no-deps-scaffold-crate)
+
+;; Task metadata
+(meta task-scaffold-crate
+  (description "Scaffold the Rust crate with the module structure defined in the spec: core/, sync/, service/, anchor/, tests/, benches/, fuzz/, examples/")
+  (acceptance "cargo build --no-default-features succeeds; module tree matches spec section 17; CI runs"))
+
+(meta task-crdt-field-wrappers
+  (description "Implement typed CRDT field wrappers over the crdts crate: G-Set for verificationMethods and revocations, ORSWOT for serviceEndpoints, LWW-Map for documentData, Max-Register for activeKey and deactivated")
+  (acceptance "All six field types compile; deactivation latch and rotation seq-check invariants enforced; no unsafe in core module"))
+
+(meta task-document-struct
+  (description "Implement Document struct with new(), merge(), merge_state(), resolve(), content_hash(), to_bytes(), from_bytes() as specified in CON-001")
+  (acceptance "Document::new() returns deterministic content_hash(); merge() returns correct MergeOutcome; to_bytes/from_bytes round-trip is lossless"))
+
+(meta task-signed-delta
+  (description "Implement SignedDelta construction and deterministic canonical JSON serialisation as specified in CON-002; integrate ssi crate for EcdsaSecp256k1Signature2019 and Ed25519Signature2020")
+  (acceptance "SignedDelta round-trips through serde; canonical JSON has sorted keys; signature computation matches ssi suite"))
+
+(meta task-hlc
+  (description "Implement Hybrid Logical Clock (HLC) with advance-on-send and advance-on-receive semantics; node_id is injected; wall-clock read is injected via clock_source abstraction")
+  (acceptance "HLC is strictly monotonically increasing under adversarial clock skew; tiebreak by node_id lexicographic order; no direct std::time import in hlc.rs"))
+
+(meta task-validate
+  (description "Implement delta validation: signature verification via ssi, seq-check for activeKey deltas, deactivation guard, unknown-DID rejection")
+  (acceptance "TEST-004 passes; stale rotation rejected (TEST-007); deactivated DID rejects all non-deactivation deltas (TEST-009); returns typed error variants from CON-001"))
+
+(meta task-resolve
+  (description "Implement CRDT state → W3C DID Core JSON-LD materialisation in resolve.rs: @context, id, verificationMethod, authentication, service, didDocumentMetadata")
+  (acceptance "Output validates against DID Core JSON-LD schema; versionId is BLAKE3 of serialised state; deactivated flag present in metadata"))
+
+(meta task-did-type
+  (description "Implement Did identifier type: did:crdt:<blake3-hash> format, parsing, display, and Serde impl")
+  (acceptance "Did parses did:crdt:<64-hex-char> without allocation; Display round-trips; invalid formats return parse error"))
+
+(meta task-proptest-merge
+  (description "Write proptest property-based tests for merge commutativity (TEST-002), associativity (TEST-003), and idempotence (TEST-005)")
+  (acceptance "All three properties pass with 10,000 proptest cases each; generator covers secp256k1 and Ed25519 keypairs"))
+
+(meta task-proptest-rotation
+  (description "Write key rotation convergence test (TEST-006) and stale rotation rejection test (TEST-007)")
+  (acceptance "Concurrent rotation tiebreak is commutative and deterministic; seq ≤ current activeKey.seq is rejected"))
+
+(meta task-proptest-deactivation
+  (description "Write deactivation irreversibility test (TEST-009) and revocation monotonicity test (TEST-008)")
+  (acceptance "Deactivated DID rejects re-activation delta and all field updates; revoked credential IDs never leave the G-Set"))
+
+(meta task-benchmark-core
+  (description "Write criterion benchmarks for merge throughput (TEST-019) and resolution latency (TEST-018)")
+  (acceptance "Merge throughput ≥ 10,000 deltas/sec on single core; resolution p99 ≤ 1ms for 100 verificationMethods + 1000 data fields"))
+
+(meta task-forbid-unsafe-core
+  (description "Add #[forbid(unsafe_code)] to the core module; add CI check: cargo build --no-default-features; verify no imports from std::fs, std::net, std::io, tokio, iroh in core/")
+  (acceptance "cargo clippy --no-default-features has zero unsafe violations (TEST-021); CI check passes (TEST-013)"))
+
+;; ─── PHASE 2: SYNC LAYER ─────────────────────────────────────────────────
+
+(given task-sync-protocol-messages)
+(given task-iroh-blobs-store)
+(given task-iroh-gossip-sync)
+(given task-integration-two-node)
+(given task-integration-offline-reunion)
+
+(meta task-sync-protocol-messages
+  (description "Define sync protocol message types (ANNOUNCE, REQUEST, DELTAS, STATE) as specified in CON-004; implement serde serialisation")
+  (acceptance "All four message types serialise/deserialise; protocol.rs has no I/O; message format matches CON-004"))
+
+(meta task-iroh-blobs-store
+  (description "Implement store.rs: persist and retrieve Document CRDT state via iroh-blobs; pin content-addressed snapshots by BLAKE3 hash")
+  (acceptance "Store round-trips Document bytes; content_hash() matches pinned blob address; gated behind 'sync' feature"))
+
+(meta task-iroh-gossip-sync
+  (description "Implement gossip.rs: iroh-gossip delta propagation; send ANNOUNCE on local delta creation; handle REQUEST and respond with DELTAS or STATE; deduplication by (did, hash) pairs")
+  (acceptance "Gossip module compiles with 'sync' feature only; deduplication prevents re-broadcast of known states; peer connections managed via iroh-net"))
+
+(meta task-integration-two-node
+  (description "Integration test: start two peered did-crdt instances, create DID on node A, verify node B converges, update on node B, verify node A reflects update (TEST-015)")
+  (acceptance "Convergence latency < 30s at p99; both nodes resolve identical DID document after each sync"))
+
+(meta task-integration-offline-reunion
+  (description "Integration test: partition two nodes, apply 50 deltas on A and 30 on B (different fields), reconnect, assert identical state with all 80 delta effects (TEST-016)")
+  (acceptance "Zero data loss; content_hash() identical on both nodes after reunion; test completes within 60s"))
+
+;; ─── PHASE 3: SERVICE LAYER ──────────────────────────────────────────────
+
+(given task-axum-http-server)
+(given task-http-handlers)
+(given task-prometheus-metrics)
+(given task-dockerise)
+(given task-integration-http-api)
+
+(meta task-axum-http-server
+  (description "Implement server.rs: axum HTTP server with DID resolution endpoint (GET /{did}), delta submission (POST /dids/{did}/deltas), DID creation (POST /dids), metrics (GET /metrics); configuration for listen address, peers, storage path")
+  (acceptance "Server starts on configured port; graceful shutdown; request tracing via tower; gated behind 'service' feature"))
+
+(meta task-http-handlers
+  (description "Implement handlers.rs: route handlers for GET /{did} (200/404/410), POST /dids (201), POST /dids/{did}/deltas (202/400/403/409) per CON-003")
+  (acceptance "All response codes per CON-003; application/did+ld+json content type on resolution; error bodies are structured JSON"))
+
+(meta task-prometheus-metrics
+  (description "Implement metrics.rs: emit OBS-001 through OBS-006 — convergence latency histogram, resolution latency histogram, merge throughput counter, delta rejection counter by reason, peer count gauge, state size gauge")
+  (acceptance "All six OBS metrics emitting at /metrics in Prometheus exposition format; label sets match spec"))
+
+(meta task-dockerise
+  (description "Write Dockerfile for did-crdt service binary compiled with 'service' and 'sync' features; multi-stage build for minimal image size")
+  (acceptance "docker build succeeds; image < 100MB; service starts and responds to GET / with 404 (no DID); health check endpoint present"))
+
+(meta task-integration-http-api
+  (description "Integration test for HTTP API: start service on localhost:0, POST /dids, GET /{did}, POST /dids/{did}/deltas, verify document updated, GET /nonexistent → 404 (TEST-014)")
+  (acceptance "All HTTP status codes per CON-003; resolved document validates against DID Core JSON-LD schema; delta submission reflects in subsequent resolution"))
+
+;; ─── PHASE 4: HARDENING ──────────────────────────────────────────────────
+
+(given task-fuzz-delta-parse)
+(given task-security-review-validate)
+(given task-wasm-compat-check)
+(given task-did-method-spec)
+(given task-open-questions-adrs)
+
+(meta task-fuzz-delta-parse
+  (description "Write cargo-fuzz target for delta deserialisation (fuzz/fuzz_targets/delta_parse.rs); run fuzzing corpus; add found crashing inputs as regression tests")
+  (acceptance "Fuzzing runs without crashes for 1 hour; all found crashes fixed and regressed; malformed delta inputs rejected cleanly"))
+
+(meta task-security-review-validate
+  (description "Cross-model adversarial review + human domain expert review of validate.rs and key rotation logic; review signature verification, seq-check, and authorisation rules per AI Trust Boundary (Tier 1)")
+  (acceptance "Security review report produced; all findings addressed or risk-accepted with documented rationale; reviewer sign-off recorded"))
+
+(meta task-wasm-compat-check
+  (description "Validate pure core compiles to wasm32-unknown-unknown; verify crdts, ssi, and blake3 crate WASM compatibility; fix any incompatibilities")
+  (acceptance "cargo build --target wasm32-unknown-unknown --no-default-features succeeds; no std::io or std::net imports in core module"))
+
+(meta task-did-method-spec
+  (description "Write W3C DID Method specification document for did:crdt: method syntax, CRUD operations, security considerations, privacy considerations; submit to DID Method Registry")
+  (acceptance "Spec document covers all W3C DID Method spec requirements; CRUD operations match implementation; security section references threat model from section 16"))
+
+(meta task-open-questions-adrs
+  (description "Address open questions from section 18: write ADRs for compaction/GC strategy, key compromise recovery, sybil resistance, state size limits; update spec with decisions")
+  (acceptance "ADR written for each of the four priority open questions; decisions are internally consistent; spec updated to reference new ADRs"))
+
+;; ─── DEPENDENCY FACTS ────────────────────────────────────────────────────
+
+;; Phase 1 internal dependencies encoded via readiness rules below.
+;; scaffold-crate has no deps (seed task).
+;; All other phase-1 tasks depend on scaffold-crate.
+
+;; Phase 2 depends on phase-1 completion gate: task-forbid-unsafe-core
+;; (represents all phase-1 quality gates passing).
+
+;; Phase 3 depends on phase-2 completion gate: task-integration-offline-reunion.
+
+;; Phase 4 depends on phase-3 completion gate: task-integration-http-api,
+;; plus task-fuzz and task-security-review are parallel.
+
+;; ─── READINESS RULES ─────────────────────────────────────────────────────
+
+;; Phase 1
+(normally r-ready-scaffold-crate
+  (and task-scaffold-crate no-deps-scaffold-crate)
+  ready-scaffold-crate)
+
+(normally r-ready-crdt-field-wrappers
+  (and task-crdt-field-wrappers completed-scaffold-crate)
+  ready-crdt-field-wrappers)
+
+(normally r-ready-did-type
+  (and task-did-type completed-scaffold-crate)
+  ready-did-type)
+
+(normally r-ready-hlc
+  (and task-hlc completed-scaffold-crate)
+  ready-hlc)
+
+(normally r-ready-signed-delta
+  (and task-signed-delta completed-crdt-field-wrappers completed-did-type)
+  ready-signed-delta)
+
+(normally r-ready-validate
+  (and task-validate completed-signed-delta completed-did-type)
+  ready-validate)
+
+(normally r-ready-document-struct
+  (and task-document-struct completed-crdt-field-wrappers completed-did-type)
+  ready-document-struct)
+
+(normally r-ready-resolve
+  (and task-resolve completed-document-struct)
+  ready-resolve)
+
+(normally r-ready-proptest-merge
+  (and task-proptest-merge completed-document-struct completed-signed-delta completed-validate)
+  ready-proptest-merge)
+
+(normally r-ready-proptest-rotation
+  (and task-proptest-rotation completed-validate completed-crdt-field-wrappers)
+  ready-proptest-rotation)
+
+(normally r-ready-proptest-deactivation
+  (and task-proptest-deactivation completed-validate completed-crdt-field-wrappers)
+  ready-proptest-deactivation)
+
+(normally r-ready-benchmark-core
+  (and task-benchmark-core completed-document-struct completed-resolve)
+  ready-benchmark-core)
+
+(normally r-ready-forbid-unsafe-core
+  (and task-forbid-unsafe-core
+       completed-proptest-merge
+       completed-proptest-rotation
+       completed-proptest-deactivation
+       completed-benchmark-core)
+  ready-forbid-unsafe-core)
+
+;; Phase 2
+(normally r-ready-sync-protocol-messages
+  (and task-sync-protocol-messages completed-forbid-unsafe-core)
+  ready-sync-protocol-messages)
+
+(normally r-ready-iroh-blobs-store
+  (and task-iroh-blobs-store completed-sync-protocol-messages)
+  ready-iroh-blobs-store)
+
+(normally r-ready-iroh-gossip-sync
+  (and task-iroh-gossip-sync completed-sync-protocol-messages completed-iroh-blobs-store)
+  ready-iroh-gossip-sync)
+
+(normally r-ready-integration-two-node
+  (and task-integration-two-node completed-iroh-gossip-sync)
+  ready-integration-two-node)
+
+(normally r-ready-integration-offline-reunion
+  (and task-integration-offline-reunion completed-integration-two-node)
+  ready-integration-offline-reunion)
+
+;; Phase 3
+(normally r-ready-axum-http-server
+  (and task-axum-http-server completed-integration-offline-reunion)
+  ready-axum-http-server)
+
+(normally r-ready-http-handlers
+  (and task-http-handlers completed-axum-http-server)
+  ready-http-handlers)
+
+(normally r-ready-prometheus-metrics
+  (and task-prometheus-metrics completed-axum-http-server)
+  ready-prometheus-metrics)
+
+(normally r-ready-dockerise
+  (and task-dockerise completed-http-handlers completed-prometheus-metrics)
+  ready-dockerise)
+
+(normally r-ready-integration-http-api
+  (and task-integration-http-api completed-http-handlers)
+  ready-integration-http-api)
+
+;; Phase 4
+(normally r-ready-fuzz-delta-parse
+  (and task-fuzz-delta-parse completed-integration-http-api)
+  ready-fuzz-delta-parse)
+
+(normally r-ready-security-review-validate
+  (and task-security-review-validate completed-validate completed-integration-http-api)
+  ready-security-review-validate)
+
+(normally r-ready-wasm-compat-check
+  (and task-wasm-compat-check completed-forbid-unsafe-core)
+  ready-wasm-compat-check)
+
+(normally r-ready-did-method-spec
+  (and task-did-method-spec completed-integration-http-api completed-security-review-validate)
+  ready-did-method-spec)
+
+(normally r-ready-open-questions-adrs
+  (and task-open-questions-adrs completed-integration-http-api)
+  ready-open-questions-adrs)
+
+;; ─── ASSIGNMENT RULES ────────────────────────────────────────────────────
+
+;; Phase 1 — engineer
+(normally r-assign-scaffold-crate
+  (and ready-scaffold-crate agent-engineer-available)
+  assign-to-scaffold-crate-engineer)
+
+(normally r-assign-crdt-field-wrappers
+  (and ready-crdt-field-wrappers agent-engineer-available)
+  assign-to-crdt-field-wrappers-engineer)
+
+(normally r-assign-did-type
+  (and ready-did-type agent-engineer-available)
+  assign-to-did-type-engineer)
+
+(normally r-assign-hlc
+  (and ready-hlc agent-engineer-available)
+  assign-to-hlc-engineer)
+
+(normally r-assign-signed-delta
+  (and ready-signed-delta agent-engineer-available)
+  assign-to-signed-delta-engineer)
+
+(normally r-assign-validate
+  (and ready-validate agent-engineer-available)
+  assign-to-validate-engineer)
+
+(normally r-assign-document-struct
+  (and ready-document-struct agent-engineer-available)
+  assign-to-document-struct-engineer)
+
+(normally r-assign-resolve
+  (and ready-resolve agent-engineer-available)
+  assign-to-resolve-engineer)
+
+(normally r-assign-proptest-merge
+  (and ready-proptest-merge agent-engineer-available)
+  assign-to-proptest-merge-engineer)
+
+(normally r-assign-proptest-rotation
+  (and ready-proptest-rotation agent-engineer-available)
+  assign-to-proptest-rotation-engineer)
+
+(normally r-assign-proptest-deactivation
+  (and ready-proptest-deactivation agent-engineer-available)
+  assign-to-proptest-deactivation-engineer)
+
+(normally r-assign-benchmark-core
+  (and ready-benchmark-core agent-engineer-available)
+  assign-to-benchmark-core-engineer)
+
+(normally r-assign-forbid-unsafe-core
+  (and ready-forbid-unsafe-core agent-engineer-available)
+  assign-to-forbid-unsafe-core-engineer)
+
+;; Phase 2 — engineer
+(normally r-assign-sync-protocol-messages
+  (and ready-sync-protocol-messages agent-engineer-available)
+  assign-to-sync-protocol-messages-engineer)
+
+(normally r-assign-iroh-blobs-store
+  (and ready-iroh-blobs-store agent-engineer-available)
+  assign-to-iroh-blobs-store-engineer)
+
+(normally r-assign-iroh-gossip-sync
+  (and ready-iroh-gossip-sync agent-engineer-available)
+  assign-to-iroh-gossip-sync-engineer)
+
+(normally r-assign-integration-two-node
+  (and ready-integration-two-node agent-engineer-available)
+  assign-to-integration-two-node-engineer)
+
+(normally r-assign-integration-offline-reunion
+  (and ready-integration-offline-reunion agent-engineer-available)
+  assign-to-integration-offline-reunion-engineer)
+
+;; Phase 3 — engineer (server) + devops (docker)
+(normally r-assign-axum-http-server
+  (and ready-axum-http-server agent-engineer-available)
+  assign-to-axum-http-server-engineer)
+
+(normally r-assign-http-handlers
+  (and ready-http-handlers agent-engineer-available)
+  assign-to-http-handlers-engineer)
+
+(normally r-assign-prometheus-metrics
+  (and ready-prometheus-metrics agent-engineer-available)
+  assign-to-prometheus-metrics-engineer)
+
+(normally r-assign-dockerise
+  (and ready-dockerise agent-devops-available)
+  assign-to-dockerise-devops)
+
+(normally r-assign-integration-http-api
+  (and ready-integration-http-api agent-engineer-available)
+  assign-to-integration-http-api-engineer)
+
+;; Phase 4 — security for review, engineer for fuzz + wasm + spec + adrs
+(normally r-assign-fuzz-delta-parse
+  (and ready-fuzz-delta-parse agent-engineer-available)
+  assign-to-fuzz-delta-parse-engineer)
+
+(normally r-assign-security-review-validate-engineer
+  (and ready-security-review-validate agent-engineer-available)
+  assign-to-security-review-validate-engineer)
+
+(normally r-assign-security-review-validate-security
+  (and ready-security-review-validate agent-security-available)
+  assign-to-security-review-validate-security)
+
+(normally r-assign-wasm-compat-check
+  (and ready-wasm-compat-check agent-engineer-available)
+  assign-to-wasm-compat-check-engineer)
+
+(normally r-assign-did-method-spec
+  (and ready-did-method-spec agent-engineer-available)
+  assign-to-did-method-spec-engineer)
+
+(normally r-assign-open-questions-adrs
+  (and ready-open-questions-adrs agent-engineer-available)
+  assign-to-open-questions-adrs-engineer)
+
+;; ─── SUPERIORITY ─────────────────────────────────────────────────────────
+
+;; Security review of validate.rs requires BOTH security agent and engineer;
+;; security agent assignment takes precedence to ensure it is not skipped.
+(prefer r-assign-security-review-validate-security r-assign-security-review-validate-engineer)
+
+;; ─── DEFEATERS / SAFETY CONSTRAINTS ──────────────────────────────────────
+
+;; Security review is a Tier 1 hard gate: validate.rs cannot ship without it.
+(except d-block-did-method-spec
+  (not completed-security-review-validate)
+  (not ready-did-method-spec))
+
+;; Phase-1 quality gates must pass before sync layer begins.
+(except d-block-sync-if-core-unsafe
+  (not completed-forbid-unsafe-core)
+  (not ready-sync-protocol-messages))
+
+;; Deactivated DID blocks all further delta processing (mirrors REQ-007).
+(except d-block-deactivated-did
+  deactivated-did-flag
+  (not ready-document-struct))
+
+;; ─── RULE METADATA ───────────────────────────────────────────────────────
+
+(meta d-block-did-method-spec
+  (description "DID method specification cannot be published before security review of validate.rs passes")
+  (justification "AI Trust Boundary Tier 1: cryptographic validation requires cross-model adversarial review and human domain expert sign-off (spec section 16)"))
+
+(meta d-block-sync-if-core-unsafe
+  (description "Sync layer must not begin until the pure core passes all quality gates including forbid(unsafe_code) and property tests")
+  (justification "Phase 1 quality gate: all property tests pass, merge throughput ≥ 10,000/sec, no unsafe (spec section 19 Phase 1)"))
+
+(meta r-assign-security-review-validate-security
+  (description "Security agent is required co-reviewer for the validate.rs and key rotation Tier 1 security review")
+  (justification "Spec section 16: cryptographic operations are a Tier 1 no-go area requiring cross-model adversarial review and human domain expert review"))
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T07:14:40Z"
+  (given delegated-v1-scaffold-crate-to-agent:claude)
+  (given (during (leased-v1-scaffold-crate) (moment "2026-03-10T07:14:40Z") (moment "2026-03-10T07:44:40Z")))
+  (given claim-v1-scaffold-crate-by-claude)
+  (normally r-cl-state-v1-scaffold-crate-by-claude claim-v1-scaffold-crate-by-claude state-claimed-v1-scaffold-crate-by-claude)
+  (normally r-cl-chain-v1-scaffold-crate-by-claude state-claimed-v1-scaffold-crate-by-claude claimed-scaffold-crate)
+)
+
+;; Propagation rules: failures in 'scaffold-crate' block downstream tasks
+(normally r-propagate-crdt-field-wrappers-from-scaffold-crate-failed failed-scaffold-crate upstream-blocked-crdt-field-wrappers)
+(normally r-propagate-crdt-field-wrappers-from-scaffold-crate-permanently-failed permanently-failed-scaffold-crate upstream-blocked-crdt-field-wrappers)
+(normally r-propagate-crdt-field-wrappers-from-scaffold-crate-stale-v1 stale-v1-scaffold-crate upstream-blocked-crdt-field-wrappers)
+(normally r-propagate-crdt-field-wrappers-from-scaffold-crate-timeout-v1 timeout-v1-scaffold-crate upstream-blocked-crdt-field-wrappers)
+(normally r-propagate-crdt-field-wrappers-from-scaffold-crate-blocked upstream-blocked-scaffold-crate upstream-blocked-crdt-field-wrappers)
+(normally r-propagate-did-type-from-scaffold-crate-failed failed-scaffold-crate upstream-blocked-did-type)
+(normally r-propagate-did-type-from-scaffold-crate-permanently-failed permanently-failed-scaffold-crate upstream-blocked-did-type)
+(normally r-propagate-did-type-from-scaffold-crate-stale-v1 stale-v1-scaffold-crate upstream-blocked-did-type)
+(normally r-propagate-did-type-from-scaffold-crate-timeout-v1 timeout-v1-scaffold-crate upstream-blocked-did-type)
+(normally r-propagate-did-type-from-scaffold-crate-blocked upstream-blocked-scaffold-crate upstream-blocked-did-type)
+(normally r-propagate-hlc-from-scaffold-crate-failed failed-scaffold-crate upstream-blocked-hlc)
+(normally r-propagate-hlc-from-scaffold-crate-permanently-failed permanently-failed-scaffold-crate upstream-blocked-hlc)
+(normally r-propagate-hlc-from-scaffold-crate-stale-v1 stale-v1-scaffold-crate upstream-blocked-hlc)
+(normally r-propagate-hlc-from-scaffold-crate-timeout-v1 timeout-v1-scaffold-crate upstream-blocked-hlc)
+(normally r-propagate-hlc-from-scaffold-crate-blocked upstream-blocked-scaffold-crate upstream-blocked-hlc)
+
+;; Transitive propagation: upstream-blocked cascades through dependency chain
+(normally r-propagate-document-struct-from-crdt-field-wrappers-blocked upstream-blocked-crdt-field-wrappers upstream-blocked-document-struct)
+(normally r-propagate-proptest-deactivation-from-crdt-field-wrappers-blocked upstream-blocked-crdt-field-wrappers upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-rotation-from-crdt-field-wrappers-blocked upstream-blocked-crdt-field-wrappers upstream-blocked-proptest-rotation)
+(normally r-propagate-signed-delta-from-crdt-field-wrappers-blocked upstream-blocked-crdt-field-wrappers upstream-blocked-signed-delta)
+(normally r-propagate-document-struct-from-did-type-blocked upstream-blocked-did-type upstream-blocked-document-struct)
+(normally r-propagate-signed-delta-from-did-type-blocked upstream-blocked-did-type upstream-blocked-signed-delta)
+(normally r-propagate-validate-from-did-type-blocked upstream-blocked-did-type upstream-blocked-validate)
+(normally r-propagate-benchmark-core-from-document-struct-blocked upstream-blocked-document-struct upstream-blocked-benchmark-core)
+(normally r-propagate-proptest-merge-from-document-struct-blocked upstream-blocked-document-struct upstream-blocked-proptest-merge)
+(normally r-propagate-resolve-from-document-struct-blocked upstream-blocked-document-struct upstream-blocked-resolve)
+(normally r-propagate-forbid-unsafe-core-from-proptest-deactivation-blocked upstream-blocked-proptest-deactivation upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-rotation-blocked upstream-blocked-proptest-rotation upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-proptest-merge-from-signed-delta-blocked upstream-blocked-signed-delta upstream-blocked-proptest-merge)
+(normally r-propagate-validate-from-signed-delta-blocked upstream-blocked-signed-delta upstream-blocked-validate)
+(normally r-propagate-proptest-deactivation-from-validate-blocked upstream-blocked-validate upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-merge-from-validate-blocked upstream-blocked-validate upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-rotation-from-validate-blocked upstream-blocked-validate upstream-blocked-proptest-rotation)
+(normally r-propagate-security-review-validate-from-validate-blocked upstream-blocked-validate upstream-blocked-security-review-validate)
+(normally r-propagate-forbid-unsafe-core-from-benchmark-core-blocked upstream-blocked-benchmark-core upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-merge-blocked upstream-blocked-proptest-merge upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-benchmark-core-from-resolve-blocked upstream-blocked-resolve upstream-blocked-benchmark-core)
+(normally r-propagate-sync-protocol-messages-from-forbid-unsafe-core-blocked upstream-blocked-forbid-unsafe-core upstream-blocked-sync-protocol-messages)
+(normally r-propagate-wasm-compat-check-from-forbid-unsafe-core-blocked upstream-blocked-forbid-unsafe-core upstream-blocked-wasm-compat-check)
+(normally r-propagate-did-method-spec-from-security-review-validate-blocked upstream-blocked-security-review-validate upstream-blocked-did-method-spec)
+(normally r-propagate-iroh-blobs-store-from-sync-protocol-messages-blocked upstream-blocked-sync-protocol-messages upstream-blocked-iroh-blobs-store)
+(normally r-propagate-iroh-gossip-sync-from-sync-protocol-messages-blocked upstream-blocked-sync-protocol-messages upstream-blocked-iroh-gossip-sync)
+(normally r-propagate-iroh-gossip-sync-from-iroh-blobs-store-blocked upstream-blocked-iroh-blobs-store upstream-blocked-iroh-gossip-sync)
+(normally r-propagate-integration-two-node-from-iroh-gossip-sync-blocked upstream-blocked-iroh-gossip-sync upstream-blocked-integration-two-node)
+(normally r-propagate-integration-offline-reunion-from-integration-two-node-blocked upstream-blocked-integration-two-node upstream-blocked-integration-offline-reunion)
+(normally r-propagate-axum-http-server-from-integration-offline-reunion-blocked upstream-blocked-integration-offline-reunion upstream-blocked-axum-http-server)
+(normally r-propagate-http-handlers-from-axum-http-server-blocked upstream-blocked-axum-http-server upstream-blocked-http-handlers)
+(normally r-propagate-prometheus-metrics-from-axum-http-server-blocked upstream-blocked-axum-http-server upstream-blocked-prometheus-metrics)
+(normally r-propagate-dockerise-from-http-handlers-blocked upstream-blocked-http-handlers upstream-blocked-dockerise)
+(normally r-propagate-integration-http-api-from-http-handlers-blocked upstream-blocked-http-handlers upstream-blocked-integration-http-api)
+(normally r-propagate-dockerise-from-prometheus-metrics-blocked upstream-blocked-prometheus-metrics upstream-blocked-dockerise)
+(normally r-propagate-did-method-spec-from-integration-http-api-blocked upstream-blocked-integration-http-api upstream-blocked-did-method-spec)
+(normally r-propagate-fuzz-delta-parse-from-integration-http-api-blocked upstream-blocked-integration-http-api upstream-blocked-fuzz-delta-parse)
+(normally r-propagate-open-questions-adrs-from-integration-http-api-blocked upstream-blocked-integration-http-api upstream-blocked-open-questions-adrs)
+(normally r-propagate-security-review-validate-from-integration-http-api-blocked upstream-blocked-integration-http-api upstream-blocked-security-review-validate)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T07:19:53Z"
+  (given completed-scaffold-crate)
+  (given eval-result-v1-scaffold-crate-by-claude)
+  (given eval-confidence-v1-scaffold-crate-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T07:19:58Z"
+  (given delegated-v1-did-type-to-agent:claude)
+  (given (during (leased-v1-did-type) (moment "2026-03-10T07:19:58Z") (moment "2026-03-10T07:49:58Z")))
+  (given claim-v1-did-type-by-claude)
+  (normally r-cl-state-v1-did-type-by-claude claim-v1-did-type-by-claude state-claimed-v1-did-type-by-claude)
+  (normally r-cl-chain-v1-did-type-by-claude state-claimed-v1-did-type-by-claude claimed-did-type)
+)
+
+;; Propagation rules: failures in 'did-type' block downstream tasks
+(normally r-propagate-document-struct-from-did-type-failed failed-did-type upstream-blocked-document-struct)
+(normally r-propagate-document-struct-from-did-type-permanently-failed permanently-failed-did-type upstream-blocked-document-struct)
+(normally r-propagate-document-struct-from-did-type-stale-v1 stale-v1-did-type upstream-blocked-document-struct)
+(normally r-propagate-document-struct-from-did-type-timeout-v1 timeout-v1-did-type upstream-blocked-document-struct)
+(normally r-propagate-signed-delta-from-did-type-failed failed-did-type upstream-blocked-signed-delta)
+(normally r-propagate-signed-delta-from-did-type-permanently-failed permanently-failed-did-type upstream-blocked-signed-delta)
+(normally r-propagate-signed-delta-from-did-type-stale-v1 stale-v1-did-type upstream-blocked-signed-delta)
+(normally r-propagate-signed-delta-from-did-type-timeout-v1 timeout-v1-did-type upstream-blocked-signed-delta)
+(normally r-propagate-validate-from-did-type-failed failed-did-type upstream-blocked-validate)
+(normally r-propagate-validate-from-did-type-permanently-failed permanently-failed-did-type upstream-blocked-validate)
+(normally r-propagate-validate-from-did-type-stale-v1 stale-v1-did-type upstream-blocked-validate)
+(normally r-propagate-validate-from-did-type-timeout-v1 timeout-v1-did-type upstream-blocked-validate)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T07:23:20Z"
+  (given completed-did-type)
+  (given eval-result-v1-did-type-by-claude)
+  (given eval-confidence-v1-did-type-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T07:23:26Z"
+  (given delegated-v1-hlc-to-agent:claude)
+  (given (during (leased-v1-hlc) (moment "2026-03-10T07:23:26Z") (moment "2026-03-10T07:53:26Z")))
+  (given claim-v1-hlc-by-claude)
+  (normally r-cl-state-v1-hlc-by-claude claim-v1-hlc-by-claude state-claimed-v1-hlc-by-claude)
+  (normally r-cl-chain-v1-hlc-by-claude state-claimed-v1-hlc-by-claude claimed-hlc)
+)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T07:25:36Z"
+  (given completed-hlc)
+  (given eval-result-v1-hlc-by-claude)
+  (given eval-confidence-v1-hlc-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T07:25:41Z"
+  (given delegated-v1-crdt-field-wrappers-to-agent:claude)
+  (given (during (leased-v1-crdt-field-wrappers) (moment "2026-03-10T07:25:41Z") (moment "2026-03-10T07:55:41Z")))
+  (given claim-v1-crdt-field-wrappers-by-claude)
+  (normally r-cl-state-v1-crdt-field-wrappers-by-claude claim-v1-crdt-field-wrappers-by-claude state-claimed-v1-crdt-field-wrappers-by-claude)
+  (normally r-cl-chain-v1-crdt-field-wrappers-by-claude state-claimed-v1-crdt-field-wrappers-by-claude claimed-crdt-field-wrappers)
+)
+
+;; Propagation rules: failures in 'crdt-field-wrappers' block downstream tasks
+(normally r-propagate-document-struct-from-crdt-field-wrappers-failed failed-crdt-field-wrappers upstream-blocked-document-struct)
+(normally r-propagate-document-struct-from-crdt-field-wrappers-permanently-failed permanently-failed-crdt-field-wrappers upstream-blocked-document-struct)
+(normally r-propagate-document-struct-from-crdt-field-wrappers-stale-v1 stale-v1-crdt-field-wrappers upstream-blocked-document-struct)
+(normally r-propagate-document-struct-from-crdt-field-wrappers-timeout-v1 timeout-v1-crdt-field-wrappers upstream-blocked-document-struct)
+(normally r-propagate-proptest-deactivation-from-crdt-field-wrappers-failed failed-crdt-field-wrappers upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-deactivation-from-crdt-field-wrappers-permanently-failed permanently-failed-crdt-field-wrappers upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-deactivation-from-crdt-field-wrappers-stale-v1 stale-v1-crdt-field-wrappers upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-deactivation-from-crdt-field-wrappers-timeout-v1 timeout-v1-crdt-field-wrappers upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-rotation-from-crdt-field-wrappers-failed failed-crdt-field-wrappers upstream-blocked-proptest-rotation)
+(normally r-propagate-proptest-rotation-from-crdt-field-wrappers-permanently-failed permanently-failed-crdt-field-wrappers upstream-blocked-proptest-rotation)
+(normally r-propagate-proptest-rotation-from-crdt-field-wrappers-stale-v1 stale-v1-crdt-field-wrappers upstream-blocked-proptest-rotation)
+(normally r-propagate-proptest-rotation-from-crdt-field-wrappers-timeout-v1 timeout-v1-crdt-field-wrappers upstream-blocked-proptest-rotation)
+(normally r-propagate-signed-delta-from-crdt-field-wrappers-failed failed-crdt-field-wrappers upstream-blocked-signed-delta)
+(normally r-propagate-signed-delta-from-crdt-field-wrappers-permanently-failed permanently-failed-crdt-field-wrappers upstream-blocked-signed-delta)
+(normally r-propagate-signed-delta-from-crdt-field-wrappers-stale-v1 stale-v1-crdt-field-wrappers upstream-blocked-signed-delta)
+(normally r-propagate-signed-delta-from-crdt-field-wrappers-timeout-v1 timeout-v1-crdt-field-wrappers upstream-blocked-signed-delta)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T07:30:37Z"
+  (given completed-crdt-field-wrappers)
+  (given eval-result-v1-crdt-field-wrappers-by-claude)
+  (given eval-confidence-v1-crdt-field-wrappers-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T07:30:42Z"
+  (given delegated-v1-document-struct-to-agent:claude)
+  (given (during (leased-v1-document-struct) (moment "2026-03-10T07:30:42Z") (moment "2026-03-10T08:00:42Z")))
+  (given claim-v1-document-struct-by-claude)
+  (normally r-cl-state-v1-document-struct-by-claude claim-v1-document-struct-by-claude state-claimed-v1-document-struct-by-claude)
+  (normally r-cl-chain-v1-document-struct-by-claude state-claimed-v1-document-struct-by-claude claimed-document-struct)
+)
+
+;; Propagation rules: failures in 'document-struct' block downstream tasks
+(normally r-propagate-benchmark-core-from-document-struct-failed failed-document-struct upstream-blocked-benchmark-core)
+(normally r-propagate-benchmark-core-from-document-struct-permanently-failed permanently-failed-document-struct upstream-blocked-benchmark-core)
+(normally r-propagate-benchmark-core-from-document-struct-stale-v1 stale-v1-document-struct upstream-blocked-benchmark-core)
+(normally r-propagate-benchmark-core-from-document-struct-timeout-v1 timeout-v1-document-struct upstream-blocked-benchmark-core)
+(normally r-propagate-proptest-merge-from-document-struct-failed failed-document-struct upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-document-struct-permanently-failed permanently-failed-document-struct upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-document-struct-stale-v1 stale-v1-document-struct upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-document-struct-timeout-v1 timeout-v1-document-struct upstream-blocked-proptest-merge)
+(normally r-propagate-resolve-from-document-struct-failed failed-document-struct upstream-blocked-resolve)
+(normally r-propagate-resolve-from-document-struct-permanently-failed permanently-failed-document-struct upstream-blocked-resolve)
+(normally r-propagate-resolve-from-document-struct-stale-v1 stale-v1-document-struct upstream-blocked-resolve)
+(normally r-propagate-resolve-from-document-struct-timeout-v1 timeout-v1-document-struct upstream-blocked-resolve)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T07:34:32Z"
+  (given completed-document-struct)
+  (given eval-result-v1-document-struct-by-claude)
+  (given eval-confidence-v1-document-struct-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T07:34:38Z"
+  (given delegated-v1-signed-delta-to-agent:claude)
+  (given (during (leased-v1-signed-delta) (moment "2026-03-10T07:34:38Z") (moment "2026-03-10T08:04:38Z")))
+  (given claim-v1-signed-delta-by-claude)
+  (normally r-cl-state-v1-signed-delta-by-claude claim-v1-signed-delta-by-claude state-claimed-v1-signed-delta-by-claude)
+  (normally r-cl-chain-v1-signed-delta-by-claude state-claimed-v1-signed-delta-by-claude claimed-signed-delta)
+)
+
+;; Propagation rules: failures in 'signed-delta' block downstream tasks
+(normally r-propagate-proptest-merge-from-signed-delta-failed failed-signed-delta upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-signed-delta-permanently-failed permanently-failed-signed-delta upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-signed-delta-stale-v1 stale-v1-signed-delta upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-signed-delta-timeout-v1 timeout-v1-signed-delta upstream-blocked-proptest-merge)
+(normally r-propagate-validate-from-signed-delta-failed failed-signed-delta upstream-blocked-validate)
+(normally r-propagate-validate-from-signed-delta-permanently-failed permanently-failed-signed-delta upstream-blocked-validate)
+(normally r-propagate-validate-from-signed-delta-stale-v1 stale-v1-signed-delta upstream-blocked-validate)
+(normally r-propagate-validate-from-signed-delta-timeout-v1 timeout-v1-signed-delta upstream-blocked-validate)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T07:45:56Z"
+  (given completed-signed-delta)
+  (given eval-result-v1-signed-delta-by-claude)
+  (given eval-confidence-v1-signed-delta-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T07:46:02Z"
+  (given delegated-v1-validate-to-agent:claude)
+  (given (during (leased-v1-validate) (moment "2026-03-10T07:46:02Z") (moment "2026-03-10T08:16:02Z")))
+  (given claim-v1-validate-by-claude)
+  (normally r-cl-state-v1-validate-by-claude claim-v1-validate-by-claude state-claimed-v1-validate-by-claude)
+  (normally r-cl-chain-v1-validate-by-claude state-claimed-v1-validate-by-claude claimed-validate)
+)
+
+;; Propagation rules: failures in 'validate' block downstream tasks
+(normally r-propagate-proptest-deactivation-from-validate-failed failed-validate upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-deactivation-from-validate-permanently-failed permanently-failed-validate upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-deactivation-from-validate-stale-v1 stale-v1-validate upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-deactivation-from-validate-timeout-v1 timeout-v1-validate upstream-blocked-proptest-deactivation)
+(normally r-propagate-proptest-merge-from-validate-failed failed-validate upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-validate-permanently-failed permanently-failed-validate upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-validate-stale-v1 stale-v1-validate upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-merge-from-validate-timeout-v1 timeout-v1-validate upstream-blocked-proptest-merge)
+(normally r-propagate-proptest-rotation-from-validate-failed failed-validate upstream-blocked-proptest-rotation)
+(normally r-propagate-proptest-rotation-from-validate-permanently-failed permanently-failed-validate upstream-blocked-proptest-rotation)
+(normally r-propagate-proptest-rotation-from-validate-stale-v1 stale-v1-validate upstream-blocked-proptest-rotation)
+(normally r-propagate-proptest-rotation-from-validate-timeout-v1 timeout-v1-validate upstream-blocked-proptest-rotation)
+(normally r-propagate-security-review-validate-from-validate-failed failed-validate upstream-blocked-security-review-validate)
+(normally r-propagate-security-review-validate-from-validate-permanently-failed permanently-failed-validate upstream-blocked-security-review-validate)
+(normally r-propagate-security-review-validate-from-validate-stale-v1 stale-v1-validate upstream-blocked-security-review-validate)
+(normally r-propagate-security-review-validate-from-validate-timeout-v1 timeout-v1-validate upstream-blocked-security-review-validate)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T07:51:49Z"
+  (given completed-validate)
+  (given eval-result-v1-validate-by-claude)
+  (given eval-confidence-v1-validate-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T07:51:55Z"
+  (given delegated-v1-proptest-merge-to-agent:claude)
+  (given (during (leased-v1-proptest-merge) (moment "2026-03-10T07:51:55Z") (moment "2026-03-10T08:21:55Z")))
+  (given claim-v1-proptest-merge-by-claude)
+  (normally r-cl-state-v1-proptest-merge-by-claude claim-v1-proptest-merge-by-claude state-claimed-v1-proptest-merge-by-claude)
+  (normally r-cl-chain-v1-proptest-merge-by-claude state-claimed-v1-proptest-merge-by-claude claimed-proptest-merge)
+)
+
+;; Propagation rules: failures in 'proptest-merge' block downstream tasks
+(normally r-propagate-forbid-unsafe-core-from-proptest-merge-failed failed-proptest-merge upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-merge-permanently-failed permanently-failed-proptest-merge upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-merge-stale-v1 stale-v1-proptest-merge upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-merge-timeout-v1 timeout-v1-proptest-merge upstream-blocked-forbid-unsafe-core)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:02:09Z"
+  (given completed-proptest-merge)
+  (given eval-result-v1-proptest-merge-by-claude)
+  (given eval-confidence-v1-proptest-merge-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:02:15Z"
+  (given delegated-v1-proptest-rotation-to-agent:claude)
+  (given (during (leased-v1-proptest-rotation) (moment "2026-03-10T08:02:15Z") (moment "2026-03-10T08:32:15Z")))
+  (given claim-v1-proptest-rotation-by-claude)
+  (normally r-cl-state-v1-proptest-rotation-by-claude claim-v1-proptest-rotation-by-claude state-claimed-v1-proptest-rotation-by-claude)
+  (normally r-cl-chain-v1-proptest-rotation-by-claude state-claimed-v1-proptest-rotation-by-claude claimed-proptest-rotation)
+)
+
+;; Propagation rules: failures in 'proptest-rotation' block downstream tasks
+(normally r-propagate-forbid-unsafe-core-from-proptest-rotation-failed failed-proptest-rotation upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-rotation-permanently-failed permanently-failed-proptest-rotation upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-rotation-stale-v1 stale-v1-proptest-rotation upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-rotation-timeout-v1 timeout-v1-proptest-rotation upstream-blocked-forbid-unsafe-core)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:10:01Z"
+  (given completed-proptest-rotation)
+  (given eval-result-v1-proptest-rotation-by-claude)
+  (given eval-confidence-v1-proptest-rotation-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:10:07Z"
+  (given delegated-v1-proptest-deactivation-to-agent:claude)
+  (given (during (leased-v1-proptest-deactivation) (moment "2026-03-10T08:10:07Z") (moment "2026-03-10T08:40:07Z")))
+  (given claim-v1-proptest-deactivation-by-claude)
+  (normally r-cl-state-v1-proptest-deactivation-by-claude claim-v1-proptest-deactivation-by-claude state-claimed-v1-proptest-deactivation-by-claude)
+  (normally r-cl-chain-v1-proptest-deactivation-by-claude state-claimed-v1-proptest-deactivation-by-claude claimed-proptest-deactivation)
+)
+
+;; Propagation rules: failures in 'proptest-deactivation' block downstream tasks
+(normally r-propagate-forbid-unsafe-core-from-proptest-deactivation-failed failed-proptest-deactivation upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-deactivation-permanently-failed permanently-failed-proptest-deactivation upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-deactivation-stale-v1 stale-v1-proptest-deactivation upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-proptest-deactivation-timeout-v1 timeout-v1-proptest-deactivation upstream-blocked-forbid-unsafe-core)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:12:49Z"
+  (given completed-proptest-deactivation)
+  (given eval-result-v1-proptest-deactivation-by-claude)
+  (given eval-confidence-v1-proptest-deactivation-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:12:54Z"
+  (given delegated-v1-resolve-to-agent:claude)
+  (given (during (leased-v1-resolve) (moment "2026-03-10T08:12:54Z") (moment "2026-03-10T08:42:54Z")))
+  (given claim-v1-resolve-by-claude)
+  (normally r-cl-state-v1-resolve-by-claude claim-v1-resolve-by-claude state-claimed-v1-resolve-by-claude)
+  (normally r-cl-chain-v1-resolve-by-claude state-claimed-v1-resolve-by-claude claimed-resolve)
+)
+
+;; Propagation rules: failures in 'resolve' block downstream tasks
+(normally r-propagate-benchmark-core-from-resolve-failed failed-resolve upstream-blocked-benchmark-core)
+(normally r-propagate-benchmark-core-from-resolve-permanently-failed permanently-failed-resolve upstream-blocked-benchmark-core)
+(normally r-propagate-benchmark-core-from-resolve-stale-v1 stale-v1-resolve upstream-blocked-benchmark-core)
+(normally r-propagate-benchmark-core-from-resolve-timeout-v1 timeout-v1-resolve upstream-blocked-benchmark-core)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:18:58Z"
+  (given completed-resolve)
+  (given eval-result-v1-resolve-by-claude)
+  (given eval-confidence-v1-resolve-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:19:03Z"
+  (given delegated-v1-benchmark-core-to-agent:claude)
+  (given (during (leased-v1-benchmark-core) (moment "2026-03-10T08:19:03Z") (moment "2026-03-10T08:49:03Z")))
+  (given claim-v1-benchmark-core-by-claude)
+  (normally r-cl-state-v1-benchmark-core-by-claude claim-v1-benchmark-core-by-claude state-claimed-v1-benchmark-core-by-claude)
+  (normally r-cl-chain-v1-benchmark-core-by-claude state-claimed-v1-benchmark-core-by-claude claimed-benchmark-core)
+)
+
+;; Propagation rules: failures in 'benchmark-core' block downstream tasks
+(normally r-propagate-forbid-unsafe-core-from-benchmark-core-failed failed-benchmark-core upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-benchmark-core-permanently-failed permanently-failed-benchmark-core upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-benchmark-core-stale-v1 stale-v1-benchmark-core upstream-blocked-forbid-unsafe-core)
+(normally r-propagate-forbid-unsafe-core-from-benchmark-core-timeout-v1 timeout-v1-benchmark-core upstream-blocked-forbid-unsafe-core)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:23:20Z"
+  (given completed-benchmark-core)
+  (given eval-result-v1-benchmark-core-by-claude)
+  (given eval-confidence-v1-benchmark-core-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:23:27Z"
+  (given delegated-v1-forbid-unsafe-core-to-agent:claude)
+  (given (during (leased-v1-forbid-unsafe-core) (moment "2026-03-10T08:23:27Z") (moment "2026-03-10T08:53:27Z")))
+  (given claim-v1-forbid-unsafe-core-by-claude)
+  (normally r-cl-state-v1-forbid-unsafe-core-by-claude claim-v1-forbid-unsafe-core-by-claude state-claimed-v1-forbid-unsafe-core-by-claude)
+  (normally r-cl-chain-v1-forbid-unsafe-core-by-claude state-claimed-v1-forbid-unsafe-core-by-claude claimed-forbid-unsafe-core)
+)
+
+;; Propagation rules: failures in 'forbid-unsafe-core' block downstream tasks
+(normally r-propagate-sync-protocol-messages-from-forbid-unsafe-core-failed failed-forbid-unsafe-core upstream-blocked-sync-protocol-messages)
+(normally r-propagate-sync-protocol-messages-from-forbid-unsafe-core-permanently-failed permanently-failed-forbid-unsafe-core upstream-blocked-sync-protocol-messages)
+(normally r-propagate-sync-protocol-messages-from-forbid-unsafe-core-stale-v1 stale-v1-forbid-unsafe-core upstream-blocked-sync-protocol-messages)
+(normally r-propagate-sync-protocol-messages-from-forbid-unsafe-core-timeout-v1 timeout-v1-forbid-unsafe-core upstream-blocked-sync-protocol-messages)
+(normally r-propagate-wasm-compat-check-from-forbid-unsafe-core-failed failed-forbid-unsafe-core upstream-blocked-wasm-compat-check)
+(normally r-propagate-wasm-compat-check-from-forbid-unsafe-core-permanently-failed permanently-failed-forbid-unsafe-core upstream-blocked-wasm-compat-check)
+(normally r-propagate-wasm-compat-check-from-forbid-unsafe-core-stale-v1 stale-v1-forbid-unsafe-core upstream-blocked-wasm-compat-check)
+(normally r-propagate-wasm-compat-check-from-forbid-unsafe-core-timeout-v1 timeout-v1-forbid-unsafe-core upstream-blocked-wasm-compat-check)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:24:32Z"
+  (given completed-forbid-unsafe-core)
+  (given eval-result-v1-forbid-unsafe-core-by-claude)
+  (given eval-confidence-v1-forbid-unsafe-core-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:24:38Z"
+  (given delegated-v1-sync-protocol-messages-to-agent:claude)
+  (given (during (leased-v1-sync-protocol-messages) (moment "2026-03-10T08:24:38Z") (moment "2026-03-10T08:54:38Z")))
+  (given claim-v1-sync-protocol-messages-by-claude)
+  (normally r-cl-state-v1-sync-protocol-messages-by-claude claim-v1-sync-protocol-messages-by-claude state-claimed-v1-sync-protocol-messages-by-claude)
+  (normally r-cl-chain-v1-sync-protocol-messages-by-claude state-claimed-v1-sync-protocol-messages-by-claude claimed-sync-protocol-messages)
+)
+
+;; Propagation rules: failures in 'sync-protocol-messages' block downstream tasks
+(normally r-propagate-iroh-blobs-store-from-sync-protocol-messages-failed failed-sync-protocol-messages upstream-blocked-iroh-blobs-store)
+(normally r-propagate-iroh-blobs-store-from-sync-protocol-messages-permanently-failed permanently-failed-sync-protocol-messages upstream-blocked-iroh-blobs-store)
+(normally r-propagate-iroh-blobs-store-from-sync-protocol-messages-stale-v1 stale-v1-sync-protocol-messages upstream-blocked-iroh-blobs-store)
+(normally r-propagate-iroh-blobs-store-from-sync-protocol-messages-timeout-v1 timeout-v1-sync-protocol-messages upstream-blocked-iroh-blobs-store)
+(normally r-propagate-iroh-gossip-sync-from-sync-protocol-messages-failed failed-sync-protocol-messages upstream-blocked-iroh-gossip-sync)
+(normally r-propagate-iroh-gossip-sync-from-sync-protocol-messages-permanently-failed permanently-failed-sync-protocol-messages upstream-blocked-iroh-gossip-sync)
+(normally r-propagate-iroh-gossip-sync-from-sync-protocol-messages-stale-v1 stale-v1-sync-protocol-messages upstream-blocked-iroh-gossip-sync)
+(normally r-propagate-iroh-gossip-sync-from-sync-protocol-messages-timeout-v1 timeout-v1-sync-protocol-messages upstream-blocked-iroh-gossip-sync)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:29:45Z"
+  (given completed-sync-protocol-messages)
+  (given eval-result-v1-sync-protocol-messages-by-claude)
+  (given eval-confidence-v1-sync-protocol-messages-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:29:53Z"
+  (given delegated-v1-wasm-compat-check-to-agent:claude)
+  (given (during (leased-v1-wasm-compat-check) (moment "2026-03-10T08:29:53Z") (moment "2026-03-10T08:59:53Z")))
+  (given claim-v1-wasm-compat-check-by-claude)
+  (normally r-cl-state-v1-wasm-compat-check-by-claude claim-v1-wasm-compat-check-by-claude state-claimed-v1-wasm-compat-check-by-claude)
+  (normally r-cl-chain-v1-wasm-compat-check-by-claude state-claimed-v1-wasm-compat-check-by-claude claimed-wasm-compat-check)
+)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:38:13Z"
+  (given completed-wasm-compat-check)
+  (given eval-result-v1-wasm-compat-check-by-claude)
+  (given eval-confidence-v1-wasm-compat-check-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:38:20Z"
+  (given delegated-v1-iroh-blobs-store-to-agent:claude)
+  (given (during (leased-v1-iroh-blobs-store) (moment "2026-03-10T08:38:20Z") (moment "2026-03-10T09:08:20Z")))
+  (given claim-v1-iroh-blobs-store-by-claude)
+  (normally r-cl-state-v1-iroh-blobs-store-by-claude claim-v1-iroh-blobs-store-by-claude state-claimed-v1-iroh-blobs-store-by-claude)
+  (normally r-cl-chain-v1-iroh-blobs-store-by-claude state-claimed-v1-iroh-blobs-store-by-claude claimed-iroh-blobs-store)
+)
+
+;; Propagation rules: failures in 'iroh-blobs-store' block downstream tasks
+(normally r-propagate-iroh-gossip-sync-from-iroh-blobs-store-failed failed-iroh-blobs-store upstream-blocked-iroh-gossip-sync)
+(normally r-propagate-iroh-gossip-sync-from-iroh-blobs-store-permanently-failed permanently-failed-iroh-blobs-store upstream-blocked-iroh-gossip-sync)
+(normally r-propagate-iroh-gossip-sync-from-iroh-blobs-store-stale-v1 stale-v1-iroh-blobs-store upstream-blocked-iroh-gossip-sync)
+(normally r-propagate-iroh-gossip-sync-from-iroh-blobs-store-timeout-v1 timeout-v1-iroh-blobs-store upstream-blocked-iroh-gossip-sync)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:44:51Z"
+  (given completed-iroh-blobs-store)
+  (given eval-result-v1-iroh-blobs-store-by-claude)
+  (given eval-confidence-v1-iroh-blobs-store-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:44:58Z"
+  (given delegated-v1-iroh-gossip-sync-to-agent:claude)
+  (given (during (leased-v1-iroh-gossip-sync) (moment "2026-03-10T08:44:58Z") (moment "2026-03-10T09:14:58Z")))
+  (given claim-v1-iroh-gossip-sync-by-claude)
+  (normally r-cl-state-v1-iroh-gossip-sync-by-claude claim-v1-iroh-gossip-sync-by-claude state-claimed-v1-iroh-gossip-sync-by-claude)
+  (normally r-cl-chain-v1-iroh-gossip-sync-by-claude state-claimed-v1-iroh-gossip-sync-by-claude claimed-iroh-gossip-sync)
+)
+
+;; Propagation rules: failures in 'iroh-gossip-sync' block downstream tasks
+(normally r-propagate-integration-two-node-from-iroh-gossip-sync-failed failed-iroh-gossip-sync upstream-blocked-integration-two-node)
+(normally r-propagate-integration-two-node-from-iroh-gossip-sync-permanently-failed permanently-failed-iroh-gossip-sync upstream-blocked-integration-two-node)
+(normally r-propagate-integration-two-node-from-iroh-gossip-sync-stale-v1 stale-v1-iroh-gossip-sync upstream-blocked-integration-two-node)
+(normally r-propagate-integration-two-node-from-iroh-gossip-sync-timeout-v1 timeout-v1-iroh-gossip-sync upstream-blocked-integration-two-node)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:52:17Z"
+  (given completed-iroh-gossip-sync)
+  (given eval-result-v1-iroh-gossip-sync-by-claude)
+  (given eval-confidence-v1-iroh-gossip-sync-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:52:24Z"
+  (given delegated-v1-integration-two-node-to-agent:claude)
+  (given (during (leased-v1-integration-two-node) (moment "2026-03-10T08:52:24Z") (moment "2026-03-10T09:22:24Z")))
+  (given claim-v1-integration-two-node-by-claude)
+  (normally r-cl-state-v1-integration-two-node-by-claude claim-v1-integration-two-node-by-claude state-claimed-v1-integration-two-node-by-claude)
+  (normally r-cl-chain-v1-integration-two-node-by-claude state-claimed-v1-integration-two-node-by-claude claimed-integration-two-node)
+)
+
+;; Propagation rules: failures in 'integration-two-node' block downstream tasks
+(normally r-propagate-integration-offline-reunion-from-integration-two-node-failed failed-integration-two-node upstream-blocked-integration-offline-reunion)
+(normally r-propagate-integration-offline-reunion-from-integration-two-node-permanently-failed permanently-failed-integration-two-node upstream-blocked-integration-offline-reunion)
+(normally r-propagate-integration-offline-reunion-from-integration-two-node-stale-v1 stale-v1-integration-two-node upstream-blocked-integration-offline-reunion)
+(normally r-propagate-integration-offline-reunion-from-integration-two-node-timeout-v1 timeout-v1-integration-two-node upstream-blocked-integration-offline-reunion)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T08:59:37Z"
+  (given completed-integration-two-node)
+  (given eval-result-v1-integration-two-node-by-claude)
+  (given eval-confidence-v1-integration-two-node-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T08:59:44Z"
+  (given delegated-v1-integration-offline-reunion-to-agent:claude)
+  (given (during (leased-v1-integration-offline-reunion) (moment "2026-03-10T08:59:44Z") (moment "2026-03-10T09:29:44Z")))
+  (given claim-v1-integration-offline-reunion-by-claude)
+  (normally r-cl-state-v1-integration-offline-reunion-by-claude claim-v1-integration-offline-reunion-by-claude state-claimed-v1-integration-offline-reunion-by-claude)
+  (normally r-cl-chain-v1-integration-offline-reunion-by-claude state-claimed-v1-integration-offline-reunion-by-claude claimed-integration-offline-reunion)
+)
+
+;; Propagation rules: failures in 'integration-offline-reunion' block downstream tasks
+(normally r-propagate-axum-http-server-from-integration-offline-reunion-failed failed-integration-offline-reunion upstream-blocked-axum-http-server)
+(normally r-propagate-axum-http-server-from-integration-offline-reunion-permanently-failed permanently-failed-integration-offline-reunion upstream-blocked-axum-http-server)
+(normally r-propagate-axum-http-server-from-integration-offline-reunion-stale-v1 stale-v1-integration-offline-reunion upstream-blocked-axum-http-server)
+(normally r-propagate-axum-http-server-from-integration-offline-reunion-timeout-v1 timeout-v1-integration-offline-reunion upstream-blocked-axum-http-server)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:01:48Z"
+  (given completed-integration-offline-reunion)
+  (given eval-result-v1-integration-offline-reunion-by-claude)
+  (given eval-confidence-v1-integration-offline-reunion-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:01:55Z"
+  (given delegated-v1-axum-http-server-to-agent:claude)
+  (given (during (leased-v1-axum-http-server) (moment "2026-03-10T09:01:55Z") (moment "2026-03-10T09:31:55Z")))
+  (given claim-v1-axum-http-server-by-claude)
+  (normally r-cl-state-v1-axum-http-server-by-claude claim-v1-axum-http-server-by-claude state-claimed-v1-axum-http-server-by-claude)
+  (normally r-cl-chain-v1-axum-http-server-by-claude state-claimed-v1-axum-http-server-by-claude claimed-axum-http-server)
+)
+
+;; Propagation rules: failures in 'axum-http-server' block downstream tasks
+(normally r-propagate-http-handlers-from-axum-http-server-failed failed-axum-http-server upstream-blocked-http-handlers)
+(normally r-propagate-http-handlers-from-axum-http-server-permanently-failed permanently-failed-axum-http-server upstream-blocked-http-handlers)
+(normally r-propagate-http-handlers-from-axum-http-server-stale-v1 stale-v1-axum-http-server upstream-blocked-http-handlers)
+(normally r-propagate-http-handlers-from-axum-http-server-timeout-v1 timeout-v1-axum-http-server upstream-blocked-http-handlers)
+(normally r-propagate-prometheus-metrics-from-axum-http-server-failed failed-axum-http-server upstream-blocked-prometheus-metrics)
+(normally r-propagate-prometheus-metrics-from-axum-http-server-permanently-failed permanently-failed-axum-http-server upstream-blocked-prometheus-metrics)
+(normally r-propagate-prometheus-metrics-from-axum-http-server-stale-v1 stale-v1-axum-http-server upstream-blocked-prometheus-metrics)
+(normally r-propagate-prometheus-metrics-from-axum-http-server-timeout-v1 timeout-v1-axum-http-server upstream-blocked-prometheus-metrics)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:10:43Z"
+  (given completed-axum-http-server)
+  (given eval-result-v1-axum-http-server-by-claude)
+  (given eval-confidence-v1-axum-http-server-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:10:51Z"
+  (given delegated-v1-prometheus-metrics-to-agent:claude)
+  (given (during (leased-v1-prometheus-metrics) (moment "2026-03-10T09:10:51Z") (moment "2026-03-10T09:40:51Z")))
+  (given claim-v1-prometheus-metrics-by-claude)
+  (normally r-cl-state-v1-prometheus-metrics-by-claude claim-v1-prometheus-metrics-by-claude state-claimed-v1-prometheus-metrics-by-claude)
+  (normally r-cl-chain-v1-prometheus-metrics-by-claude state-claimed-v1-prometheus-metrics-by-claude claimed-prometheus-metrics)
+)
+
+;; Propagation rules: failures in 'prometheus-metrics' block downstream tasks
+(normally r-propagate-dockerise-from-prometheus-metrics-failed failed-prometheus-metrics upstream-blocked-dockerise)
+(normally r-propagate-dockerise-from-prometheus-metrics-permanently-failed permanently-failed-prometheus-metrics upstream-blocked-dockerise)
+(normally r-propagate-dockerise-from-prometheus-metrics-stale-v1 stale-v1-prometheus-metrics upstream-blocked-dockerise)
+(normally r-propagate-dockerise-from-prometheus-metrics-timeout-v1 timeout-v1-prometheus-metrics upstream-blocked-dockerise)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:14:06Z"
+  (given completed-prometheus-metrics)
+  (given eval-result-v1-prometheus-metrics-by-claude)
+  (given eval-confidence-v1-prometheus-metrics-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:14:13Z"
+  (given delegated-v1-http-handlers-to-agent:claude)
+  (given (during (leased-v1-http-handlers) (moment "2026-03-10T09:14:13Z") (moment "2026-03-10T09:44:13Z")))
+  (given claim-v1-http-handlers-by-claude)
+  (normally r-cl-state-v1-http-handlers-by-claude claim-v1-http-handlers-by-claude state-claimed-v1-http-handlers-by-claude)
+  (normally r-cl-chain-v1-http-handlers-by-claude state-claimed-v1-http-handlers-by-claude claimed-http-handlers)
+)
+
+;; Propagation rules: failures in 'http-handlers' block downstream tasks
+(normally r-propagate-dockerise-from-http-handlers-failed failed-http-handlers upstream-blocked-dockerise)
+(normally r-propagate-dockerise-from-http-handlers-permanently-failed permanently-failed-http-handlers upstream-blocked-dockerise)
+(normally r-propagate-dockerise-from-http-handlers-stale-v1 stale-v1-http-handlers upstream-blocked-dockerise)
+(normally r-propagate-dockerise-from-http-handlers-timeout-v1 timeout-v1-http-handlers upstream-blocked-dockerise)
+(normally r-propagate-integration-http-api-from-http-handlers-failed failed-http-handlers upstream-blocked-integration-http-api)
+(normally r-propagate-integration-http-api-from-http-handlers-permanently-failed permanently-failed-http-handlers upstream-blocked-integration-http-api)
+(normally r-propagate-integration-http-api-from-http-handlers-stale-v1 stale-v1-http-handlers upstream-blocked-integration-http-api)
+(normally r-propagate-integration-http-api-from-http-handlers-timeout-v1 timeout-v1-http-handlers upstream-blocked-integration-http-api)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:16:37Z"
+  (given completed-http-handlers)
+  (given eval-result-v1-http-handlers-by-claude)
+  (given eval-confidence-v1-http-handlers-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:16:44Z"
+  (given delegated-v1-integration-http-api-to-agent:claude)
+  (given (during (leased-v1-integration-http-api) (moment "2026-03-10T09:16:44Z") (moment "2026-03-10T09:46:44Z")))
+  (given claim-v1-integration-http-api-by-claude)
+  (normally r-cl-state-v1-integration-http-api-by-claude claim-v1-integration-http-api-by-claude state-claimed-v1-integration-http-api-by-claude)
+  (normally r-cl-chain-v1-integration-http-api-by-claude state-claimed-v1-integration-http-api-by-claude claimed-integration-http-api)
+)
+
+;; Propagation rules: failures in 'integration-http-api' block downstream tasks
+(normally r-propagate-did-method-spec-from-integration-http-api-failed failed-integration-http-api upstream-blocked-did-method-spec)
+(normally r-propagate-did-method-spec-from-integration-http-api-permanently-failed permanently-failed-integration-http-api upstream-blocked-did-method-spec)
+(normally r-propagate-did-method-spec-from-integration-http-api-stale-v1 stale-v1-integration-http-api upstream-blocked-did-method-spec)
+(normally r-propagate-did-method-spec-from-integration-http-api-timeout-v1 timeout-v1-integration-http-api upstream-blocked-did-method-spec)
+(normally r-propagate-fuzz-delta-parse-from-integration-http-api-failed failed-integration-http-api upstream-blocked-fuzz-delta-parse)
+(normally r-propagate-fuzz-delta-parse-from-integration-http-api-permanently-failed permanently-failed-integration-http-api upstream-blocked-fuzz-delta-parse)
+(normally r-propagate-fuzz-delta-parse-from-integration-http-api-stale-v1 stale-v1-integration-http-api upstream-blocked-fuzz-delta-parse)
+(normally r-propagate-fuzz-delta-parse-from-integration-http-api-timeout-v1 timeout-v1-integration-http-api upstream-blocked-fuzz-delta-parse)
+(normally r-propagate-open-questions-adrs-from-integration-http-api-failed failed-integration-http-api upstream-blocked-open-questions-adrs)
+(normally r-propagate-open-questions-adrs-from-integration-http-api-permanently-failed permanently-failed-integration-http-api upstream-blocked-open-questions-adrs)
+(normally r-propagate-open-questions-adrs-from-integration-http-api-stale-v1 stale-v1-integration-http-api upstream-blocked-open-questions-adrs)
+(normally r-propagate-open-questions-adrs-from-integration-http-api-timeout-v1 timeout-v1-integration-http-api upstream-blocked-open-questions-adrs)
+(normally r-propagate-security-review-validate-from-integration-http-api-failed failed-integration-http-api upstream-blocked-security-review-validate)
+(normally r-propagate-security-review-validate-from-integration-http-api-permanently-failed permanently-failed-integration-http-api upstream-blocked-security-review-validate)
+(normally r-propagate-security-review-validate-from-integration-http-api-stale-v1 stale-v1-integration-http-api upstream-blocked-security-review-validate)
+(normally r-propagate-security-review-validate-from-integration-http-api-timeout-v1 timeout-v1-integration-http-api upstream-blocked-security-review-validate)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:21:36Z"
+  (given completed-integration-http-api)
+  (given eval-result-v1-integration-http-api-by-claude)
+  (given eval-confidence-v1-integration-http-api-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:21:44Z"
+  (given delegated-v1-fuzz-delta-parse-to-agent:claude)
+  (given (during (leased-v1-fuzz-delta-parse) (moment "2026-03-10T09:21:44Z") (moment "2026-03-10T09:51:44Z")))
+  (given claim-v1-fuzz-delta-parse-by-claude)
+  (normally r-cl-state-v1-fuzz-delta-parse-by-claude claim-v1-fuzz-delta-parse-by-claude state-claimed-v1-fuzz-delta-parse-by-claude)
+  (normally r-cl-chain-v1-fuzz-delta-parse-by-claude state-claimed-v1-fuzz-delta-parse-by-claude claimed-fuzz-delta-parse)
+)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:27:46Z"
+  (given completed-fuzz-delta-parse)
+  (given eval-result-v1-fuzz-delta-parse-by-claude)
+  (given eval-confidence-v1-fuzz-delta-parse-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:27:55Z"
+  (given delegated-v1-security-review-validate-to-agent:claude)
+  (given (during (leased-v1-security-review-validate) (moment "2026-03-10T09:27:55Z") (moment "2026-03-10T09:57:55Z")))
+  (given claim-v1-security-review-validate-by-claude)
+  (normally r-cl-state-v1-security-review-validate-by-claude claim-v1-security-review-validate-by-claude state-claimed-v1-security-review-validate-by-claude)
+  (normally r-cl-chain-v1-security-review-validate-by-claude state-claimed-v1-security-review-validate-by-claude claimed-security-review-validate)
+)
+
+;; Propagation rules: failures in 'security-review-validate' block downstream tasks
+(normally r-propagate-did-method-spec-from-security-review-validate-failed failed-security-review-validate upstream-blocked-did-method-spec)
+(normally r-propagate-did-method-spec-from-security-review-validate-permanently-failed permanently-failed-security-review-validate upstream-blocked-did-method-spec)
+(normally r-propagate-did-method-spec-from-security-review-validate-stale-v1 stale-v1-security-review-validate upstream-blocked-did-method-spec)
+(normally r-propagate-did-method-spec-from-security-review-validate-timeout-v1 timeout-v1-security-review-validate upstream-blocked-did-method-spec)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:41:30Z"
+  (given completed-security-review-validate)
+  (given eval-result-v1-security-review-validate-by-claude)
+  (given eval-confidence-v1-security-review-validate-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:41:39Z"
+  (given delegated-v1-did-method-spec-to-agent:claude)
+  (given (during (leased-v1-did-method-spec) (moment "2026-03-10T09:41:39Z") (moment "2026-03-10T10:11:39Z")))
+  (given claim-v1-did-method-spec-by-claude)
+  (normally r-cl-state-v1-did-method-spec-by-claude claim-v1-did-method-spec-by-claude state-claimed-v1-did-method-spec-by-claude)
+  (normally r-cl-chain-v1-did-method-spec-by-claude state-claimed-v1-did-method-spec-by-claude claimed-did-method-spec)
+)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:46:55Z"
+  (given completed-did-method-spec)
+  (given eval-result-v1-did-method-spec-by-claude)
+  (given eval-confidence-v1-did-method-spec-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:47:04Z"
+  (given delegated-v1-open-questions-adrs-to-agent:claude)
+  (given (during (leased-v1-open-questions-adrs) (moment "2026-03-10T09:47:04Z") (moment "2026-03-10T10:17:04Z")))
+  (given claim-v1-open-questions-adrs-by-claude)
+  (normally r-cl-state-v1-open-questions-adrs-by-claude claim-v1-open-questions-adrs-by-claude state-claimed-v1-open-questions-adrs-by-claude)
+  (normally r-cl-chain-v1-open-questions-adrs-by-claude state-claimed-v1-open-questions-adrs-by-claude claimed-open-questions-adrs)
+)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:51:06Z"
+  (given completed-open-questions-adrs)
+  (given eval-result-v1-open-questions-adrs-by-claude)
+  (given eval-confidence-v1-open-questions-adrs-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-10T09:51:13Z"
+  (given delegated-v1-dockerise-to-agent:claude)
+  (given (during (leased-v1-dockerise) (moment "2026-03-10T09:51:13Z") (moment "2026-03-10T10:21:13Z")))
+  (given claim-v1-dockerise-by-claude)
+  (normally r-cl-state-v1-dockerise-by-claude claim-v1-dockerise-by-claude state-claimed-v1-dockerise-by-claude)
+  (normally r-cl-chain-v1-dockerise-by-claude state-claimed-v1-dockerise-by-claude claimed-dockerise)
+)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-10T09:53:10Z"
+  (given completed-dockerise)
+  (given eval-result-v1-dockerise-by-claude)
+  (given eval-confidence-v1-dockerise-1.00)
+)

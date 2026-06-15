@@ -1,0 +1,89 @@
+[package]
+name = "did-crdt"
+version = "0.1.0"
+edition = "2021"
+description = "Coordination-free decentralised identifiers via signed CRDTs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anuna-research/did-crdt"
+keywords = ["did", "crdt", "decentralised-identity", "w3c"]
+categories = ["cryptography", "network-programming"]
+rust-version = "1.75"
+
+[features]
+default = []
+sync    = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-blobs", "dep:iroh-io", "dep:bytes", "dep:tokio", "dep:anyhow", "dep:pkarr"]
+service = ["dep:axum", "dep:prometheus", "dep:tokio"]
+anchor  = []
+
+[dependencies]
+# ── pure core ────────────────────────────────────────────────────────────────
+crdts   = "7"
+blake3  = "1"
+serde   = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror  = "1"
+
+# ── cryptography ─────────────────────────────────────────────────────────────
+ed25519-dalek = { version = "2" }
+k256          = { version = "0.13", features = ["ecdsa"] }
+base64ct      = { version = "1", features = ["alloc"] }
+
+# ── sync (feature-gated) ─────────────────────────────────────────────────────
+iroh        = { version = "0.21", optional = true }
+iroh-gossip = { version = "0.21", optional = true }
+iroh-blobs  = { version = "0.21", optional = true }
+iroh-io     = { version = "0.6", optional = true }
+anyhow      = { version = "1", optional = true }
+bytes       = { version = "1", optional = true }
+tokio       = { version = "1", features = ["full"], optional = true }
+
+# ── service (feature-gated) ──────────────────────────────────────────────────
+axum        = { version = "0.7", optional = true }
+prometheus  = { version = "0.13", optional = true }
+
+# ── pkarr DHT (feature-gated, part of sync) ──────────────────────────────────
+pkarr       = { version = "2", optional = true, features = ["async", "relay"] }
+
+# ── wasm32 WASM-compatible getrandom backends ────────────────────────────────
+# Multiple major versions are in the dep tree (0.2, 0.3, 0.4) from
+# ed25519-dalek/k256/crdts transitively.  For wasm32-unknown-unknown each
+# version needs a specific feature to compile.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom    = { version = "0.2", features = ["js"] }
+getrandom03  = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom04  = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+proptest  = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio     = { version = "1", features = ["full"] }
+reqwest   = { version = "0.12", features = ["json"] }
+tower     = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name              = "did-crdt-service"
+path              = "src/bin/did-crdt-service.rs"
+required-features = ["service", "sync"]
+
+[[bin]]
+name              = "pkarr-relay-stub"
+path              = "src/bin/pkarr-relay-stub.rs"
+required-features = ["service"]
+
+[[example]]
+name              = "two_node_demo"
+path              = "examples/two_node_demo.rs"
+required-features = ["service", "sync"]
+
+[[bench]]
+name    = "merge"
+harness = false
+
+[[bench]]
+name    = "resolve"
+harness = false
+
+[profile.release]
+lto           = true
+codegen-units = 1
+strip         = "debuginfo"

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 706e33b7706ebf9b1f0ab047ce4ba2b369bb0eb73577df1a2516d2e61e4a5660 # shrinks to ops = [(AddServiceEndpoint { id: "svc-0", service_type: "LinkedDomains", endpoint: "https://svc0.example.com" }, HlcTimestamp { wall_ms: 1, logical: 0, node_id: 1 })]
+cc 36f0b0251a9ff6f670ad3696a3be265ec0226f13a560fd4c3fb46ffbbd19475e # shrinks to ops_a = [], ops_b = [], ops_c = [(AddServiceEndpoint { id: "svc-0", service_type: "LinkedDomains", endpoint: "https://svc0.example.com" }, HlcTimestamp { wall_ms: 1, logical: 0, node_id: 3 })]
+cc 7c2c80af536c3f052c96a9c34800f24601a706b5b8e24ca7a4d362952776fde3 # shrinks to ops_a = [], ops_b = [(AddServiceEndpoint { id: "svc-0", service_type: "LinkedDomains", endpoint: "https://svc0.example.com" }, HlcTimestamp { wall_ms: 1, logical: 0, node_id: 2 })]
+cc 8ffd6823bde6ceef8499910cb43563a0b8e2e534831582d1dc9680c4c9becac6 # shrinks to ops_a = [(AddServiceEndpoint { id: "svc-2", service_type: "LinkedDomains", endpoint: "https://svc2.example.com" }, HlcTimestamp { wall_ms: 1, logical: 0, node_id: 1 })], ops_b = [(RemoveServiceEndpoint { id: "svc-2" }, HlcTimestamp { wall_ms: 1, logical: 0, node_id: 2 })]
