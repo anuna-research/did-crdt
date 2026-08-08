@@ -133,6 +133,10 @@ impl PkarrBackend {
 
 // ── DhtNode ───────────────────────────────────────────────────────────────────
 
+/// Secondary address store used only by in-process test mode, so the field
+/// that holds it states a type rather than a nest of four.
+type AddrStore = Arc<Mutex<HashMap<[u8; 32], NodeAddr>>>;
+
 /// DHT peer discovery node (CON-006).
 ///
 /// Wraps a pkarr relay backend and provides:
@@ -147,7 +151,7 @@ pub struct DhtNode {
     /// Keyed by `derive_keypair(did).public_key().to_bytes()`.
     /// When set, `publish` writes the full `NodeAddr` here and `lookup` returns
     /// it so in-process tests get direct socket addresses without a relay.
-    addr_store: Option<Arc<Mutex<HashMap<[u8; 32], NodeAddr>>>>,
+    addr_store: Option<AddrStore>,
     /// Last successful publication per DID, for trigger-1 deduplication
     /// (CON-006 §publication). The refresh task bypasses this.
     published: Mutex<HashMap<Did, (std::time::Instant, NodeAddr)>>,

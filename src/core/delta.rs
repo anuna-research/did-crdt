@@ -37,16 +37,11 @@ use crate::core::Result;
 // ── SuiteType ─────────────────────────────────────────────────────────────────
 
 /// Supported Linked-Data Proof signature suites.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SuiteType {
+    #[default]
     Ed25519Signature2020,
     EcdsaSecp256k1Signature2019,
-}
-
-impl Default for SuiteType {
-    fn default() -> Self {
-        Self::Ed25519Signature2020
-    }
 }
 
 impl SuiteType {

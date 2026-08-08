@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::core::crdt::{
     ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods,
-    ServiceEndpoints, ServiceEntry, VerificationMethods,
+    ServiceEndpoints, ServiceEntry, VerificationMethodEntry, VerificationMethods,
 };
 use crate::core::admission::{AdmissionResult, RejectReason};
 use crate::core::causal::verify_causal;
@@ -214,6 +214,28 @@ fn topo_order_bundle(by_hash: &HashMap<DeltaHash, SignedDelta>) -> Result<Vec<De
 }
 
 impl Document {
+    /// Every verification method currently in resolved state, with the
+    /// relationships each one holds.
+    ///
+    /// Unlike [`Self::resolve`] this does **not** drop revoked methods and does
+    /// not disappear when the document is deactivated: a consumer deciding
+    /// whether to trust a signature needs to see a method that exists and is
+    /// revoked as something different from a method that was never there.
+    /// Filtering is the caller's, because which relationship matters is the
+    /// caller's question.
+    pub fn verification_methods(&self) -> Vec<VerificationMethodEntry> {
+        self.verification_methods.entries()
+    }
+
+    /// The grow-only credential revocation set.
+    ///
+    /// [`Self::is_revoked`] answers membership for one identifier; a consumer
+    /// building its own view of revocation state needs the set itself, and a
+    /// G-Set is safe to hand out whole because it only ever grows.
+    pub fn revoked_credential_ids(&self) -> Vec<String> {
+        self.revocations.entries()
+    }
+
     // ── construction ─────────────────────────────────────────────────────────
 
     /// Create a new DID document from a public key in Multibase encoding.
@@ -380,13 +402,13 @@ impl Document {
         }
         // A signer known only via state-import (no AddVM delta) must actually be a
         // current, non-revoked verification method.
-        if !self.dag.has_authorising_delta(&signer) && !self.verification_methods.entries().is_empty()
+        if !self.dag.has_authorising_delta(&signer)
+            && !self.verification_methods.entries().is_empty()
+            && !self.verification_methods.contains_id(&signer)
         {
-            if !self.verification_methods.contains_id(&signer) {
-                return Err(Error::Unauthorised(format!(
-                    "signer key {signer} is not an authorised verification method"
-                )));
-            }
+            return Err(Error::Unauthorised(format!(
+                "signer key {signer} is not an authorised verification method"
+            )));
         }
         // A revocation present only in current state (no `RevokeVerificationMethod`
         // delta) is a state-import fact the causal check could not see.

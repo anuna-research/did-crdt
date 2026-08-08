@@ -1,5 +1,12 @@
 name: CI
 
+# Third-party actions are fully qualified. Forgejo resolves a bare
+# `uses: owner/repo` against its own action host, which mirrors `actions/*`
+# and nothing else — so `dtolnay/rust-toolchain` and `Swatinem/rust-cache`
+# resolved to "repository not found" and every job died during setup, before
+# a single step ran. `actions/checkout` is left bare because that one IS
+# mirrored.
+
 on:
   push:
     branches: [main]
@@ -11,8 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
       - run: cargo test
 
   core-no-std-io:
@@ -20,8 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
       - run: cargo build --no-default-features
 
   lint:
@@ -29,8 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: https://github.com/Swatinem/rust-cache@v2
       - run: cargo clippy --all-features -- -D warnings
