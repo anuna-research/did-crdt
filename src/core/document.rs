@@ -380,13 +380,13 @@ impl Document {
         }
         // A signer known only via state-import (no AddVM delta) must actually be a
         // current, non-revoked verification method.
-        if !self.dag.has_authorising_delta(&signer) && !self.verification_methods.entries().is_empty()
+        if !self.dag.has_authorising_delta(&signer)
+            && !self.verification_methods.entries().is_empty()
+            && !self.verification_methods.contains_id(&signer)
         {
-            if !self.verification_methods.contains_id(&signer) {
-                return Err(Error::Unauthorised(format!(
-                    "signer key {signer} is not an authorised verification method"
-                )));
-            }
+            return Err(Error::Unauthorised(format!(
+                "signer key {signer} is not an authorised verification method"
+            )));
         }
         // A revocation present only in current state (no `RevokeVerificationMethod`
         // delta) is a state-import fact the causal check could not see.
