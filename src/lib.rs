@@ -68,7 +68,8 @@ impl Default for DocStore {
 // ── public re-exports ─────────────────────────────────────────────────────────
 
 pub use crate::core::{
-    delta::SignedDelta,
+    crdt::VerificationMethodEntry,
+    delta::{SignedDelta, SuiteType, VerificationRelationship},
     did::Did,
     document::Document,
     resolve::{DidDocument, ResolutionResult},
