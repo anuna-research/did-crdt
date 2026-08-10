@@ -673,6 +673,31 @@ impl Document {
         Ok(applied)
     }
 
+/// Render a multibase Ed25519 public key as an RFC 8037 OKP JWK.
+///
+/// Returns `None` for anything this cannot render faithfully — an unexpected
+/// multibase prefix, or a key that is not 32 octets. A twin is omitted rather
+/// than guessed at: a `JsonWebKey` carrying the wrong bytes would verify
+/// signatures made by a key nobody authorised, which is worse than a document
+/// with no twin in it.
+///
+/// `d` is never present. A projection reads public state and has no private
+/// component to leak, and `CON-206` step 6 in the adopting profile refuses a
+/// JWK that carries one.
+fn jwk_from_multibase(multibase: &str) -> Option<Value> {
+    use base64ct::{Base64UrlUnpadded, Encoding as _};
+
+    let raw = Base64UrlUnpadded::decode_vec(multibase.strip_prefix('u')?).ok()?;
+    if raw.len() != 32 {
+        return None;
+    }
+    Some(serde_json::json!({
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": Base64UrlUnpadded::encode_string(&raw),
+    }))
+}
+
     // ── projection ───────────────────────────────────────────────────────────
 
     /// Project the current CRDT state to a W3C DID Core 1.1 resolution result.
@@ -701,7 +726,8 @@ impl Document {
                     id: entry.id.clone(),
                     r#type: entry.suite_type.verification_method_type().to_owned(),
                     controller: self.did.to_string(),
-                    public_key_multibase: entry.public_key_multibase,
+                    public_key_multibase: Some(entry.public_key_multibase.clone()),
+                    public_key_jwk: None,
                 });
                 // Place the key ID into each relationship array it belongs to.
                 for rel in &entry.relationships {
@@ -724,6 +750,43 @@ impl Document {
                         }
                     }
                 }
+            }
+
+            // Project `JsonWebKey` twins for the keys that already assert.
+            //
+            // Computed from state that exists, so nothing signed changes and the
+            // bytes deriving the identifier are untouched. See
+            // `resolve::JsonWebKey2020` for why only assertion keys are twinned
+            // and why the index is positional.
+            let mut asserting: Vec<&VerificationMethod> = doc
+                .verification_method
+                .iter()
+                .filter(|m| {
+                    doc.assertion_method.iter().any(|r| r.as_str() == Some(m.id.as_str()))
+                })
+                .collect();
+            // Ordered by id so the numbering is a function of state rather than
+            // of the order deltas happened to arrive.
+            asserting.sort_by(|a, b| a.id.cmp(&b.id));
+
+            let twins: Vec<VerificationMethod> = asserting
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, method)| {
+                    let jwk = Self::jwk_from_multibase(method.public_key_multibase.as_deref()?)?;
+                    Some(VerificationMethod {
+                        id: format!("{}{}{index}", self.did, crate::core::resolve::JWK_FRAGMENT_PREFIX),
+                        r#type: crate::core::resolve::JSON_WEB_KEY_TYPE.to_owned(),
+                        controller: self.did.to_string(),
+                        public_key_multibase: None,
+                        public_key_jwk: Some(jwk),
+                    })
+                })
+                .collect();
+
+            for twin in twins {
+                doc.assertion_method.push(Value::String(twin.id.clone()));
+                doc.verification_method.push(twin);
             }
 
             // Map service endpoints.
@@ -1404,7 +1467,10 @@ mod tests {
         let result = doc.resolve().unwrap();
         let resolved = result.did_document.unwrap();
         assert_eq!(resolved.verification_method.len(), 1);
-        assert_eq!(resolved.verification_method[0].public_key_multibase, "zEd25519TestKey");
+        assert_eq!(
+            resolved.verification_method[0].public_key_multibase.as_deref(),
+            Some("zEd25519TestKey")
+        );
         assert_eq!(resolved.verification_method[0].r#type, "Ed25519VerificationKey2020");
         assert_eq!(resolved.authentication.len(), 1);
     }
@@ -2212,4 +2278,159 @@ mod tests {
             assert_eq!(receiver.delta_count(), log_len, "delta log unchanged");
         }
     }
+    // ── JsonWebKey projection ────────────────────────────────────────────────
+
+    /// A monotonically increasing timestamp, so successive test ops order.
+    fn next_ts() -> HlcTimestamp {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(1);
+        HlcTimestamp {
+            wall_ms: N.fetch_add(1, Ordering::Relaxed),
+            logical: 0,
+            node_id: 0,
+        }
+    }
+
+    /// Authorise `id` to assert, carrying `mb` as its key.
+    fn assert_asserting(doc: &mut Document, id: &str, mb: &str) {
+        doc.apply_op(
+            &DeltaOp::AddVerificationMethod {
+                id: id.to_owned(),
+                public_key_multibase: mb.to_owned(),
+                suite_type: SuiteType::Ed25519Signature2020,
+                relationships: vec![VerificationRelationship::AssertionMethod],
+            },
+            next_ts(),
+            &[],
+        )
+        .unwrap();
+    }
+
+    /// A key that only authenticates gets no twin.
+    ///
+    /// This is the property that keeps the projection from conferring authority.
+    /// Genesis creates `#key-0` with `Authentication` alone, and if twinning
+    /// were unconditional the resolver would hand every DID an assertion key no
+    /// delta ever authorised.
+    #[test]
+    fn an_authentication_only_key_is_not_twinned() {
+        let (doc, _) = Document::new("uAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+        let resolved = doc.resolve().unwrap().did_document.unwrap();
+
+        assert_eq!(resolved.verification_method.len(), 1);
+        assert!(resolved.assertion_method.is_empty());
+        assert!(!resolved.verification_method.iter().any(|m| m.r#type == "JsonWebKey"));
+    }
+
+    /// An asserting key is twinned, at `#jwk-0`, carrying the same key material.
+    #[test]
+    fn an_asserting_key_is_twinned_as_a_json_web_key() {
+        use base64ct::{Base64UrlUnpadded, Encoding as _};
+
+        let raw = [0x11u8; 32];
+        let mb = format!("u{}", Base64UrlUnpadded::encode_string(&raw));
+        let (mut doc, _) = Document::new(&mb).unwrap();
+
+        // A second method for the same key, authorised to assert.
+        let id = format!("{}#key-1", doc.did);
+        assert_asserting(&mut doc, &id, &mb);
+
+        let resolved = doc.resolve().unwrap().did_document.unwrap();
+        let twin_id = format!("{}#jwk-0", doc.did);
+
+        let twin = resolved
+            .verification_method
+            .iter()
+            .find(|m| m.id == twin_id)
+            .expect("the asserting key is twinned at #jwk-0");
+
+        assert_eq!(twin.r#type, "JsonWebKey");
+        assert_eq!(twin.controller, doc.did.to_string());
+        assert!(twin.public_key_multibase.is_none(), "a twin carries one encoding, not two");
+
+        let jwk = twin.public_key_jwk.as_ref().expect("a twin carries publicKeyJwk");
+        assert_eq!(jwk["kty"], "OKP");
+        assert_eq!(jwk["crv"], "Ed25519");
+        assert_eq!(jwk["x"], Base64UrlUnpadded::encode_string(&raw));
+        assert!(jwk.get("d").is_none(), "a projection has no private component to leak");
+
+        // And it is reachable as an assertion method, which is the point.
+        assert!(resolved.assertion_method.iter().any(|r| r.as_str() == Some(twin_id.as_str())));
+    }
+
+    /// The DID is a hash of the genesis op. A projection computed at resolution
+    /// cannot move it, and this is the assertion `ADR-010`'s pin rests on.
+    #[test]
+    fn the_projection_does_not_move_the_identifier() {
+        use base64ct::{Base64UrlUnpadded, Encoding as _};
+
+        let mb = format!("u{}", Base64UrlUnpadded::encode_string(&[0x22u8; 32]));
+        let (mut doc, _) = Document::new(&mb).unwrap();
+        let before = doc.did.to_string();
+
+        let id = format!("{}#key-1", doc.did);
+        assert_asserting(&mut doc, &id, &mb);
+
+        let resolved = doc.resolve().unwrap().did_document.unwrap();
+        assert!(resolved.verification_method.iter().any(|m| m.r#type == "JsonWebKey"));
+        assert_eq!(doc.did.to_string(), before);
+        assert_eq!(resolved.id, before);
+    }
+
+    /// Numbering is positional among asserting keys and ordered by id, so it is
+    /// a function of state rather than of the order deltas arrived.
+    #[test]
+    fn twins_are_numbered_by_position_not_by_source_fragment() {
+        use base64ct::{Base64UrlUnpadded, Encoding as _};
+
+        let mb = format!("u{}", Base64UrlUnpadded::encode_string(&[0x33u8; 32]));
+        let (mut doc, _) = Document::new(&mb).unwrap();
+
+        // Added out of order, and neither is `#key-0`.
+        for fragment in ["#key-7", "#key-3"] {
+            let id = format!("{}{fragment}", doc.did);
+            assert_asserting(&mut doc, &id, &mb);
+        }
+
+        let resolved = doc.resolve().unwrap().did_document.unwrap();
+        let twins: Vec<&str> = resolved
+            .verification_method
+            .iter()
+            .filter(|m| m.r#type == "JsonWebKey")
+            .map(|m| m.id.as_str())
+            .collect();
+
+        // `#key-3` sorts before `#key-7`, so it takes `#jwk-0` whichever order
+        // the deltas arrived in.
+        assert_eq!(
+            twins,
+            vec![format!("{}#jwk-0", doc.did), format!("{}#jwk-1", doc.did)]
+        );
+    }
+
+    /// A revoked key is not twinned, because it is not projected at all.
+    #[test]
+    fn a_revoked_asserting_key_loses_its_twin() {
+        use base64ct::{Base64UrlUnpadded, Encoding as _};
+
+        let mb = format!("u{}", Base64UrlUnpadded::encode_string(&[0x44u8; 32]));
+        let (mut doc, _) = Document::new(&mb).unwrap();
+        let id = format!("{}#key-1", doc.did);
+
+        assert_asserting(&mut doc, &id, &mb);
+        assert!(doc
+            .resolve()
+            .unwrap()
+            .did_document
+            .unwrap()
+            .verification_method
+            .iter()
+            .any(|m| m.r#type == "JsonWebKey"));
+
+        doc.apply_op(&DeltaOp::RevokeVerificationMethod { key_id: id }, next_ts(), &[]).unwrap();
+
+        let resolved = doc.resolve().unwrap().did_document.unwrap();
+        assert!(!resolved.verification_method.iter().any(|m| m.r#type == "JsonWebKey"));
+    }
+
 }
