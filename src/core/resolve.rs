@@ -146,14 +146,69 @@ impl DidDocument {
 }
 
 /// A verification method entry in a DID document.
+///
+/// Exactly one key encoding is present. `publicKeyMultibase` is what a
+/// `did:crdt` delta carries; `publicKeyJwk` appears only on the projected
+/// `JsonWebKey` twins described on [`JsonWebKey2020`], and DID Core forbids a
+/// method from carrying both.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerificationMethod {
     pub id: String,
     pub r#type: String,
     pub controller: String,
-    #[serde(rename = "publicKeyMultibase")]
-    pub public_key_multibase: String,
+    #[serde(rename = "publicKeyMultibase", skip_serializing_if = "Option::is_none")]
+    pub public_key_multibase: Option<String>,
+    #[serde(rename = "publicKeyJwk", skip_serializing_if = "Option::is_none")]
+    pub public_key_jwk: Option<Value>,
 }
+
+/// The verification-method `type` of a projected JWK twin.
+pub const JSON_WEB_KEY_TYPE: &str = "JsonWebKey";
+
+/// The fragment prefix a projected twin uses, against `#key-` for the method it
+/// projects.
+pub const JWK_FRAGMENT_PREFIX: &str = "#jwk-";
+
+/// Marker for the documentation of the JWK projection.
+///
+/// # Why the twins exist
+///
+/// The W3C VC JOSE/COSE controlled-identifier profile requires an issuer's key
+/// to resolve as `type: JsonWebKey` with `publicKeyJwk`. A `did:crdt` delta
+/// carries `publicKeyMultibase` and a suite type, so a document built only from
+/// deltas can never satisfy that profile — and a verifier following it refuses
+/// every credential the DID issues.
+///
+/// The projection closes that without touching anything signed: it is computed
+/// at resolution from state that already exists, so no delta changes, no
+/// signature changes, and **the bytes that derive the identifier are untouched**.
+///
+/// # Why only assertion keys are twinned
+///
+/// A twin is emitted only for a method already in `assertionMethod`, and it
+/// inherits that relationship and no other.
+///
+/// The alternative — twinning every key and placing the twin in
+/// `assertionMethod` because that is what JWKs are *for* — would let the
+/// resolver grant an authority no delta ever expressed. A key authorised to
+/// authenticate would silently become able to make statements for the DID. A
+/// resolver that can widen authority is the substitution the whole signed-closure
+/// design exists to prevent, and it would be worse here than elsewhere because
+/// the widening looks like a rendering detail.
+///
+/// So the projection can only ever restate an authority the deltas already
+/// carry. A DID whose keys never assert gets no twins, and a credential it
+/// issues is refused — correctly.
+///
+/// # Numbering
+///
+/// Twins are numbered by position among assertion-capable methods, ordered by
+/// method id, so the first is `#jwk-0`. The index is deliberately *not* copied
+/// from the source fragment: `#key-3` may be the only asserting key, and a
+/// consumer looking for the issuer's key should find it at `#jwk-0` rather than
+/// having to know which delta happened to create it.
+#[derive(Clone, Copy, Debug)]
+pub struct JsonWebKey2020;
 
 /// A service endpoint entry in a DID document.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -246,7 +301,8 @@ mod tests {
             id: format!("{}#key-0", did),
             r#type: "Ed25519VerificationKey2020".to_owned(),
             controller: did.to_string(),
-            public_key_multibase: "zFakeKey".to_owned(),
+            public_key_multibase: Some("zFakeKey".to_owned()),
+            public_key_jwk: None,
         });
         let json = serde_json::to_value(&doc).unwrap();
         assert!(
@@ -377,7 +433,8 @@ mod tests {
             id: format!("{}#key-0", did),
             r#type: "Ed25519VerificationKey2020".to_owned(),
             controller: did.to_string(),
-            public_key_multibase: "zAbc".to_owned(),
+            public_key_multibase: Some("zAbc".to_owned()),
+            public_key_jwk: None,
         });
         let json = serde_json::to_value(&doc).unwrap();
         let vm = &json["verificationMethod"][0];
@@ -405,7 +462,8 @@ mod tests {
             id: format!("{}#key-0", did),
             r#type: "Ed25519VerificationKey2020".to_owned(),
             controller: did.to_string(),
-            public_key_multibase: "zTestKey".to_owned(),
+            public_key_multibase: Some("zTestKey".to_owned()),
+            public_key_jwk: None,
         });
         doc.authentication.push(Value::String(format!("{}#key-0", did)));
 
