@@ -805,6 +805,49 @@ impl Document {
             .map(|e| e.public_key_multibase)
     }
 
+    /// The signed deltas this replica holds, as a causal-closure bundle.
+    ///
+    /// This is what a verifier that will not take a resolver's word for the
+    /// document needs: a projected document carries no signatures, so
+    /// deserialising one makes the RESOLVER authoritative on the DID's own
+    /// revocations. Replaying these makes the signatures authoritative instead.
+    ///
+    /// EVERY frontier head's closure is included, not just the target's. With
+    /// concurrent heads, one head's ancestry omits the other branch, and a
+    /// verifier replaying it would materialise a document missing whatever only
+    /// the other branch carries — a revocation, for instance. Serving less than
+    /// the full history is how a resolver silently answers an old question.
+    ///
+    /// `target` names one head deterministically (the greatest hash), so the
+    /// answer is stable across replicas holding the same state. It is the head
+    /// the bundle was extracted at, not a claim that it is the only one.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the local closure is incomplete — an ancestor is referenced but
+    /// not held. Refusing beats serving a bundle a verifier would reject for
+    /// dangling parents after paying to transfer it.
+    pub fn closure_bundle(&self) -> Result<ClosureBundle> {
+        let mut heads = self.dag.frontier();
+        heads.sort();
+        let Some(target) = heads.last().cloned() else {
+            return Err(Error::DeltaRejected(
+                "no delta history from which to extract a closure".to_owned(),
+            ));
+        };
+
+        let mut deltas: Vec<SignedDelta> = Vec::new();
+        let mut seen: HashSet<DeltaHash> = HashSet::new();
+        for head in &heads {
+            for delta in self.dag.extract_closure(head, &[])?.deltas {
+                if seen.insert(delta.content_hash()?) {
+                    deltas.push(delta);
+                }
+            }
+        }
+        Ok(ClosureBundle { target, deltas })
+    }
+
     pub fn resolve(&self) -> Result<ResolutionResult> {
         let is_deactivated = self.deactivated.is_set();
 
@@ -959,6 +1002,11 @@ impl Document {
             // has the same reason to want the relation as one checking a live
             // document.
             genesis_public_key_multibase: self.genesis_public_key_multibase(),
+            // Off unless the caller asked for it with the `includeClosure`
+            // resolution option; the handler stamps it. Extracting the whole
+            // history on every resolution would make callers who only want the
+            // document pay for evidence they never read.
+            signed_closure: None,
         };
 
         Ok(ResolutionResult {
@@ -1993,6 +2041,172 @@ mod tests {
             node_id: 1,
         };
         merge_op(&mut doc, op, ts, &signer).expect("delta under 64 KiB should be accepted");
+    }
+
+    // ── closure bundle (the includeClosure resolution option) ─────────────────
+
+    /// A real Ed25519-backed document. Unsigned test deltas cannot be replayed:
+    /// `verify_signature` permits an empty proof only at genesis, which is
+    /// exactly the property a replay-based verifier depends on.
+    fn signed_doc() -> (Document, crate::core::delta::SigningKey, String) {
+        use base64ct::{Base64UrlUnpadded, Encoding as _};
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
+        let (doc, _) = Document::new(&pk_mb).unwrap();
+        let key_id = doc.verification_methods.entries()[0].id.clone();
+        (doc, crate::core::delta::SigningKey::Ed25519(sk), key_id)
+    }
+
+    fn node_id_of(key: &crate::core::delta::SigningKey) -> u64 {
+        match key {
+            crate::core::delta::SigningKey::Ed25519(sk) => {
+                crate::core::validate::node_id_from_pubkey(sk.verifying_key().as_bytes())
+            }
+            _ => unreachable!("tests use Ed25519"),
+        }
+    }
+
+    /// Replay a bundle the way selfsame's verifier does: bootstrap from the
+    /// genesis root key — which recomputes the self-certifying DID — and merge.
+    /// Nothing here deserialises a projected document.
+    fn replay(bundle: ClosureBundle, expected: &Document) {
+        let root = bundle
+            .deltas
+            .iter()
+            .find(|d| d.parents.is_empty())
+            .expect("a closure has exactly one genesis delta");
+        let DeltaOp::AddVerificationMethod {
+            public_key_multibase,
+            ..
+        } = &root.op
+        else {
+            panic!("genesis must add a verification method")
+        };
+        let (mut replayed, _) = Document::new(public_key_multibase).unwrap();
+        assert_eq!(
+            replayed.did, expected.did,
+            "genesis must derive the same DID"
+        );
+        replayed.merge_verified_bundle(bundle).unwrap();
+        assert_eq!(
+            replayed.content_hash().unwrap(),
+            expected.content_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn closure_bundle_replays_to_the_same_document() {
+        // The property that matters: a verifier who takes ONLY the bundle, and
+        // trusts none of the projection, reaches the state we would have served.
+        let (mut doc, sk, key_id) = signed_doc();
+        let delta = SignedDelta::new_with_parents(
+            doc.did.clone(),
+            DeltaOp::SetAlsoKnownAs {
+                uris: vec!["acct:hugo@chat.anuna.io".to_owned()],
+            },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: node_id_of(&sk),
+            },
+            doc.dag.frontier(),
+            key_id,
+            &sk,
+        )
+        .unwrap();
+        doc.merge(delta).unwrap();
+
+        let bundle = doc.closure_bundle().unwrap();
+        assert!(
+            bundle
+                .deltas
+                .iter()
+                .any(|d| d.content_hash().unwrap() == bundle.target),
+            "the target must be present in its own bundle, or a replay refuses it"
+        );
+        replay(bundle, &doc);
+    }
+
+    #[test]
+    fn closure_bundle_carries_every_head_not_just_the_target() {
+        // With concurrent heads, the target's ancestry alone omits the other
+        // branch. A verifier replaying that would materialise a document missing
+        // whatever only the other branch carries — a revocation, say — and would
+        // have no way to tell. This is the case a single extract_closure(target)
+        // gets wrong, and the reason closure_bundle unions every head.
+        let (mut doc, sk, key_id) = signed_doc();
+        let genesis_head = doc.dag.frontier();
+
+        for i in [1u64, 2] {
+            let delta = SignedDelta::new_with_parents(
+                doc.did.clone(),
+                DeltaOp::SetDocumentData {
+                    key: format!("branch{i}"),
+                    value: serde_json::json!(i),
+                },
+                HlcTimestamp {
+                    wall_ms: 9 + i,
+                    logical: 0,
+                    node_id: node_id_of(&sk),
+                },
+                genesis_head.clone(),
+                key_id.clone(),
+                &sk,
+            )
+            .unwrap();
+            doc.merge(delta).unwrap();
+        }
+        assert_eq!(doc.dag.frontier().len(), 2, "premise: two concurrent heads");
+
+        let bundle = doc.closure_bundle().unwrap();
+        assert_eq!(bundle.deltas.len(), 3, "genesis plus both branches");
+        replay(bundle, &doc);
+    }
+
+    #[test]
+    fn closure_bundle_is_deterministic_across_replicas() {
+        // `target` names one head; two replicas holding the same state must
+        // name the same one, or a caller comparing two resolvers sees a
+        // difference that is not one.
+        let (mut a, _) = make_doc();
+        let (mut b, _) = make_doc();
+        for doc in [&mut a, &mut b] {
+            let signer = doc.verification_methods.entries()[0].id.clone();
+            merge_op(
+                doc,
+                DeltaOp::SetAlsoKnownAs {
+                    uris: vec!["acct:hugo@chat.anuna.io".to_owned()],
+                },
+                HlcTimestamp {
+                    wall_ms: 10,
+                    logical: 0,
+                    node_id: 1,
+                },
+                &signer,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            a.closure_bundle().unwrap().target,
+            b.closure_bundle().unwrap().target
+        );
+    }
+
+    #[test]
+    fn resolve_omits_the_closure_unless_asked() {
+        // Off by default: the option is what turns it on, and the property must
+        // be absent rather than null so a caller cannot read an omission as an
+        // established empty history.
+        let (doc, _) = make_doc();
+        let result = doc.resolve().unwrap();
+        assert!(result.did_document_metadata.signed_closure.is_none());
+        let json: Value =
+            serde_json::from_str(&serde_json::to_string(&result.did_document_metadata).unwrap())
+                .unwrap();
+        assert!(json.get("signedClosure").is_none());
     }
 
     // ── alsoKnownAs ───────────────────────────────────────────────────────────

@@ -80,6 +80,27 @@ pub struct DidDocumentMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub genesis_public_key_multibase: Option<String>,
+
+    /// The signed deltas this document was materialised from, when the caller
+    /// asked for them with the `includeClosure` resolution option.
+    ///
+    /// A method-specific property. DID Resolution 1.0 §12.1 maps `Accept` to
+    /// "the caller's preferred representation of the DID document", and a
+    /// closure is NOT a representation of the document — it is the evidence the
+    /// document is derived from. So this is carried as a registered
+    /// method-specific metadata property rather than negotiated as a content
+    /// type, which keeps one canonical `GET /{did}` for every consumer.
+    ///
+    /// It exists because a projected document carries no signatures. A verifier
+    /// that deserialises `didDocument` has made the RESOLVER the authority on
+    /// the DID's own revocations. Replaying these deltas instead makes the
+    /// signatures the authority, which is the only reason a resolver operated by
+    /// someone else can be relied on at all.
+    ///
+    /// Off by default: it carries the entire history, and a caller that only
+    /// wants the document should not pay for it.
+    #[serde(rename = "signedClosure", skip_serializing_if = "Option::is_none")]
+    pub signed_closure: Option<crate::core::recon::ClosureBundle>,
 }
 
 // ── ResolutionResult ────────────────────────────────────────────────────────
@@ -464,6 +485,7 @@ mod tests {
                 created: None,
                 updated: None,
                 genesis_public_key_multibase: None,
+                signed_closure: None,
             },
         };
         let json = serde_json::to_value(&result).unwrap();
@@ -493,6 +515,7 @@ mod tests {
             created: Some("2026-01-01T00:00:00.000Z".to_owned()),
             updated: Some("2026-03-10T12:00:00.000Z".to_owned()),
             genesis_public_key_multibase: None,
+            signed_closure: None,
         };
         let json = serde_json::to_value(&meta).unwrap();
         assert_eq!(json["created"], json!("2026-01-01T00:00:00.000Z"));
@@ -622,6 +645,7 @@ mod tests {
                 created: Some("2026-01-01T00:00:00.000Z".to_owned()),
                 updated: None,
                 genesis_public_key_multibase: None,
+                signed_closure: None,
             },
         };
         let json = serde_json::to_string(&result).unwrap();

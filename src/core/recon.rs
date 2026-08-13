@@ -29,7 +29,7 @@ use crate::core::{Error, Result};
 /// When produced with a non-empty `stop` set (the recipient's frontier), the
 /// bundle is pruned to the deltas *between* `target` and what the recipient
 /// already holds — transfer proportional to the divergence, not the history.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClosureBundle {
     /// The head delta this bundle was extracted for.
     pub target: DeltaHash,

@@ -1,7 +1,7 @@
 ---
 title: "SPEC-032: did-crdt — Coordination-Free Decentralised Identifiers via Signed CRDTs"
 id: SPEC-032
-version: 0.3.0
+version: 0.4.0
 status: draft
 created: 2026-03-10
 last_updated: 2026-08-13
@@ -708,6 +708,45 @@ Trace:
 - CON-007
 ```
 
+```
+REQ-016: Signed Closure Retrieval
+
+The system SHALL, when a resolution request carries the `includeClosure`
+option, return the signed deltas from which the DID document was materialised,
+as a causal-closure bundle of { target, deltas }.
+
+WHY THIS EXISTS. A projected DID document carries no signatures. A verifier
+that deserialises one has made the RESOLVER authoritative on the DID's own
+revocations -- it is taking the resolver's word for which keys are valid. A
+verifier that replays the deltas instead makes the SIGNATURES authoritative,
+which is the only basis on which a resolver operated by someone else can be
+relied upon. Without this, an independently-operated resolver is not usable by
+a verifier that does not already trust its operator.
+
+The bundle SHALL include the causal closure of EVERY frontier head, not only
+the target's. With concurrent heads, one head's ancestry omits the other
+branch, and a verifier replaying it would materialise a document missing
+whatever only that branch carries -- a revocation, for instance -- with no way
+to detect the omission.
+
+`target` SHALL name one head deterministically, so replicas holding the same
+state return the same target and a caller comparing two resolvers does not see
+a difference that is not one. It names the head the bundle was extracted at and
+is not a claim that it is the only head.
+
+The system SHALL refuse rather than serve an incomplete closure: if a required
+ancestor is not held, no sound bundle can be built.
+
+The bundle SHALL be omitted unless requested. It carries the whole history, and
+a caller that wants only the document must not pay for evidence it will not
+read.
+
+Trace:
+- TEST-031
+- TEST-032
+- CON-003
+```
+
 ## 8. Non-Functional Requirements
 
 ```
@@ -1218,6 +1257,32 @@ Content-Type: application/did+ld+json
     "deactivated": false
   }
 }
+
+GET /{did}?includeClosure=true
+
+Adds `didDocumentMetadata.signedClosure` -- the signed deltas the document was
+materialised from, as { target, deltas }:
+
+  "didDocumentMetadata": {
+    ...,
+    "signedClosure": { "target": "<delta-hash>", "deltas": [ <SignedDelta>, ... ] }
+  }
+
+Omitted unless requested, and absent rather than null when omitted. A resolver
+that cannot extract a sound closure returns an error rather than 200 without the
+property: answering 200 with the option silently unhonoured would let a verifier
+believe it had checked signatures it never received.
+
+This is a method-specific RESOLUTION OPTION, carried as a query parameter per
+DID Resolution 1.0 §12.1, and a method-specific METADATA PROPERTY. Both SHOULD
+be registered in the DID Resolution Extensions registry.
+
+It is deliberately NOT content negotiation. §12.1 maps `Accept` to "the media
+type of the caller's preferred representation of the DID document", and a
+closure is not a representation of the document -- it is the evidence the
+document is derived from. Negotiating it as a content type would misuse the
+mechanism and fork `GET /{did}` into two incompatible bodies; as metadata, one
+canonical URL serves every consumer.
 
 Response 404: DID not found in local state
 Response 410: DID deactivated
@@ -2204,6 +2269,56 @@ TEST-030: alsoKnownAs Projection and Convergence (unit)
    withdrawal.
 ```
 
+```
+TEST-031: Closure Bundle Replays to the Served State (unit)
+
+The property that makes REQ-016 worth anything: a verifier who takes ONLY the
+bundle, and trusts none of the projection, reaches the state the resolver would
+have served.
+
+1. Build a document with a genesis and at least one further SIGNED delta.
+   Unsigned deltas cannot be used: verify_signature permits an empty proof only
+   at genesis, which is precisely the property a replay-based verifier relies
+   on.
+2. Extract the closure bundle. Assert the target is present in its own bundle
+   (a bundle whose target is absent is refused on replay).
+3. Replay as the consuming verifier does: find the parentless genesis delta,
+   bootstrap a fresh replica from its root key -- which recomputes the
+   self-certifying DID -- assert the derived DID equals the one asked about,
+   then merge_verified_bundle.
+4. Assert the replayed content_hash equals the original's.
+
+Scenario B — concurrent heads:
+5. Build two deltas both parented on genesis, so the frontier holds two heads.
+6. Assert the bundle carries genesis plus BOTH branches, and that it replays to
+   the same content hash.
+
+Step 6 is the case a single extract_closure(target) gets wrong: the target's
+ancestry alone omits the other branch.
+
+Scenario C — determinism:
+7. Two replicas built to the same state MUST return the same target.
+```
+
+```
+TEST-032: includeClosure at the HTTP Surface (integration)
+
+The option is the contract a verifier codes against, so it is pinned at the
+HTTP boundary and not only in the core.
+
+1. Create a DID over HTTP.
+2. GET /{did} with no option: assert didDocumentMetadata has NO signedClosure
+   member -- absent, not null.
+3. GET /{did}?includeClosure=true: assert signedClosure is present and names a
+   target with a non-empty deltas array.
+4. Deserialise it as a ClosureBundle, bootstrap from its genesis root key,
+   assert the derived DID equals the one served, and merge_verified_bundle.
+
+Step 4 is the substantive assertion. A bundle that deserialises but does not
+reconstruct the DID is worth nothing to a verifier, and only replaying it
+proves the difference.
+```
+
 ## 12. Purity Boundary Map
 
 ### Pure Core (no I/O, no shared state, deterministic)
@@ -2342,6 +2457,7 @@ REQ-012 (Service Mode)         → TEST-014          → service.rs       → OB
 REQ-013 (DHT Registration)     → TEST-022          → sync/dht.rs      → OBS-005
 REQ-014 (Cold-Start Resolution)→ TEST-023          → sync/dht.rs, sync/live.rs → OBS-005
 REQ-015 (alsoKnownAs)          → TEST-028, TEST-029, TEST-030 → crdt.rs, validate.rs, document.rs → OBS-004
+REQ-016 (Signed Closure)       → TEST-031, TEST-032 → document.rs, recon.rs, service/handlers.rs → OBS-002
 
 NFR-001 (Convergence Latency)  → TEST-015          → sync.rs          → OBS-001
 NFR-002 (Offline Tolerance)    → TEST-016          → document.rs      → OBS-001

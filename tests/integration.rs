@@ -557,6 +557,94 @@ mod http_api {
     };
     use did_crdt::service::server::Server;
 
+    /// The `includeClosure` resolution option (DID Resolution 1.0 §12.1 carries
+    /// resolution options as query parameters).
+    ///
+    /// This is the contract a replay-based verifier codes against, so it is
+    /// pinned at the HTTP surface rather than only at the core: the option name,
+    /// the property name, absence by default, and that what comes back actually
+    /// replays.
+    #[tokio::test]
+    async fn include_closure_option_returns_replayable_deltas() {
+        let (serve, addr) = Server::bind_ephemeral().await.expect("bind ephemeral");
+        tokio::spawn(async move { serve.await.expect("server error") });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[0xC1u8; 32]);
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
+        let body: serde_json::Value = client
+            .post(format!("{base}/dids"))
+            .json(&serde_json::json!({ "publicKeyMultibase": pk_mb }))
+            .send()
+            .await
+            .expect("POST /dids")
+            .json()
+            .await
+            .expect("parse body");
+        let did_str = body["did"].as_str().expect("did").to_owned();
+
+        // Absent by default — a caller who did not ask is not charged for the
+        // history, and must not read an omission as an empty one.
+        let plain: serde_json::Value = client
+            .get(format!("{base}/{did_str}"))
+            .send()
+            .await
+            .expect("GET")
+            .json()
+            .await
+            .expect("parse");
+        assert!(
+            plain["didDocumentMetadata"].get("signedClosure").is_none(),
+            "signedClosure must be absent unless requested"
+        );
+
+        // Present when asked, and it must REPLAY — a bundle that deserialises
+        // but does not reconstruct the DID is worth nothing to a verifier.
+        let with: serde_json::Value = client
+            .get(format!("{base}/{did_str}?includeClosure=true"))
+            .send()
+            .await
+            .expect("GET with option")
+            .json()
+            .await
+            .expect("parse");
+        let closure = with["didDocumentMetadata"]
+            .get("signedClosure")
+            .expect("signedClosure must be present when requested");
+        assert!(closure.get("target").is_some(), "bundle names its head");
+        let deltas = closure["deltas"].as_array().expect("deltas array");
+        assert!(!deltas.is_empty());
+
+        let bundle: did_crdt::core::recon::ClosureBundle =
+            serde_json::from_value(closure.clone()).expect("bundle must deserialise");
+        let root = bundle
+            .deltas
+            .iter()
+            .find(|d| d.parents.is_empty())
+            .expect("exactly one genesis delta");
+        let did_crdt::core::delta::DeltaOp::AddVerificationMethod {
+            public_key_multibase,
+            ..
+        } = &root.op
+        else {
+            panic!("genesis must add a verification method")
+        };
+        let (mut replayed, _) =
+            did_crdt::core::document::Document::new(public_key_multibase).expect("bootstrap");
+        assert_eq!(
+            replayed.did.as_str(),
+            did_str,
+            "the closure's genesis must derive the DID it was served under"
+        );
+        replayed
+            .merge_verified_bundle(bundle)
+            .expect("every delta must verify on replay");
+    }
+
     #[tokio::test]
     async fn create_resolve_update_notfound() {
         // ── Step 1: bind to localhost:0 ───────────────────────────────────────
