@@ -140,11 +140,6 @@ pub async fn create_did(
 
 // ── GET /:did ─────────────────────────────────────────────────────────────────
 
-/// Resolve a DID to a W3C DID document.
-///
-/// - 200 with DID document on success
-/// - 404 if not found in local state
-/// - 410 Gone if the DID is deactivated
 /// Resolution options accepted on `GET /{did}`.
 ///
 /// DID Resolution 1.0 §12.1 carries resolution options as query parameters, and
@@ -169,6 +164,11 @@ fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::
     Ok(matches!(raw.as_deref(), Some("true") | Some("")))
 }
 
+/// Resolve a DID to a W3C DID document.
+///
+/// - 200 with DID document on success
+/// - 404 if not found in local state
+/// - 410 Gone if the DID is deactivated
 pub async fn resolve_did(
     State(state): State<AppState>,
     Path(did_str): Path<String>,

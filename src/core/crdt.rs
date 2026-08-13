@@ -531,6 +531,9 @@ impl Deactivated {
 /// set" and "change the alias" are the same operation. With one element, a
 /// whole-set register and per-element LWW are indistinguishable.
 ///
+/// The cardinality bound in `validate::MAX_ALSO_KNOWN_AS` is a resource bound
+/// against replicated bloat, NOT what keeps the above true. Nothing mechanical
+/// enforces the single-alias shape; it is a property of how aliases are minted.
 // SIMPLIFY: the ceiling is a SECOND independently-managed alias. Two aliases
 // with separate lifecycles (a derived one plus, say, a user-chosen handle)
 // reintroduce lost updates: a write carrying one can silently drop the other,
@@ -542,10 +545,6 @@ impl Deactivated {
 // current state and so reintroduce the read-modify-write it was meant to
 // remove. It also brings tombstones, which cannot be collected without causal
 // stability this design deliberately lacks.
-///
-/// The cardinality bound in `validate::MAX_ALSO_KNOWN_AS` is a resource bound
-/// against replicated bloat, NOT what keeps the above true. Nothing mechanical
-/// enforces the single-alias shape; it is a property of how aliases are minted.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AlsoKnownAs(LWWReg<Vec<String>, HlcTimestamp>);
 
