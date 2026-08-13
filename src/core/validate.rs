@@ -29,6 +29,81 @@ use crate::core::delta::{DeltaOp, SignedDelta, SuiteType};
 use crate::core::document::Document;
 use crate::core::{Error, Result};
 
+// ── alsoKnownAs recogniser ───────────────────────────────────────────────────
+
+/// Most aliases a document may carry.
+///
+/// A bound rather than a considered maximum: `alsoKnownAs` is replicated to
+/// every peer holding the DID, so an unbounded list is a cheap way to make
+/// other people store data. Raise it if a real use needs more.
+pub const MAX_ALSO_KNOWN_AS: usize = 32;
+
+/// Longest single alias URI, in bytes.
+pub const MAX_ALSO_KNOWN_AS_URI_LEN: usize = 512;
+
+/// Recognise an `alsoKnownAs` URI set before any of it is applied.
+///
+/// The grammar, deliberately narrower than RFC 3986:
+///
+/// ```text
+/// set     = 0*32( uri )                     ; distinct, each 1..=512 bytes
+/// uri     = scheme ":" 1*( %x21-7E )        ; no space, no control chars
+/// scheme  = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+/// ```
+///
+/// Narrower on purpose. These strings are republished by verifiers and appear
+/// in a DID document consumed by software this project does not control, so the
+/// recogniser fails closed: it admits the absolute-URI forms the binding
+/// actually uses (`acct:`, `https:`, `did:`) and refuses anything it cannot
+/// classify, rather than accepting whatever a permissive parser tolerates.
+/// Widening it later is a compatible change; narrowing it would not be.
+///
+/// Rejecting relative references is the substantive restriction: an alias is a
+/// claim about an identity somewhere else, and a relative reference has no
+/// meaning without a base the document does not carry.
+pub fn recognise_also_known_as(uris: &[String]) -> Result<()> {
+    if uris.len() > MAX_ALSO_KNOWN_AS {
+        return Err(Error::DeltaRejected(format!(
+            "alsoKnownAs carries {} entries, limit is {MAX_ALSO_KNOWN_AS}",
+            uris.len()
+        )));
+    }
+    for uri in uris {
+        if uri.is_empty() || uri.len() > MAX_ALSO_KNOWN_AS_URI_LEN {
+            return Err(Error::DeltaRejected(format!(
+                "alsoKnownAs entry length {} is outside 1..={MAX_ALSO_KNOWN_AS_URI_LEN}",
+                uri.len()
+            )));
+        }
+        // Split at the FIRST colon: a scheme cannot contain one, so any later
+        // colon belongs to the remainder and is not our business.
+        let Some((scheme, rest)) = uri.split_once(':') else {
+            return Err(Error::DeltaRejected(format!(
+                "alsoKnownAs entry {uri:?} is not an absolute URI (no scheme)"
+            )));
+        };
+        let scheme_ok = scheme
+            .strip_prefix(|c: char| c.is_ascii_alphabetic())
+            .is_some_and(|tail| {
+                tail.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            });
+        if !scheme_ok {
+            return Err(Error::DeltaRejected(format!(
+                "alsoKnownAs entry {uri:?} has a malformed scheme"
+            )));
+        }
+        // Printable ASCII only, and non-empty. Excludes space (%x20) and DEL,
+        // so control characters cannot ride along into a republished document.
+        if rest.is_empty() || !rest.chars().all(|c| ('\u{21}'..='\u{7E}').contains(&c)) {
+            return Err(Error::DeltaRejected(format!(
+                "alsoKnownAs entry {uri:?} has an empty or non-printable body"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ── verify_signature ──────────────────────────────────────────────────────────
 
 /// Verify the cryptographic signature on `delta` against the public key
@@ -240,6 +315,7 @@ fn decode_multibase_u(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::crdt::AlsoKnownAs;
     use crate::core::delta::{DeltaOp, SignedDelta, SigningKey};
     use crate::core::document::Document;
     use crate::core::hlc::HlcTimestamp;
@@ -378,6 +454,7 @@ mod tests {
             verification_methods: VerificationMethods::new(),
             service_endpoints: ServiceEndpoints::new(),
             document_data: DocumentData::new(),
+            also_known_as: AlsoKnownAs::new(),
             active_key: ActiveKey::new(),
             revocations: Revocations::new(),
             revoked_verification_methods: RevokedVerificationMethods::new(),
@@ -577,6 +654,7 @@ mod tests {
             verification_methods: VerificationMethods::new(),
             service_endpoints: ServiceEndpoints::new(),
             document_data: DocumentData::new(),
+            also_known_as: AlsoKnownAs::new(),
             active_key: ActiveKey::new(),
             revocations: Revocations::new(),
             revoked_verification_methods: RevokedVerificationMethods::new(),
@@ -619,6 +697,7 @@ mod tests {
             verification_methods: VerificationMethods::new(),
             service_endpoints: ServiceEndpoints::new(),
             document_data: DocumentData::new(),
+            also_known_as: AlsoKnownAs::new(),
             active_key: ActiveKey::new(),
             revocations: Revocations::new(),
             revoked_verification_methods: RevokedVerificationMethods::new(),

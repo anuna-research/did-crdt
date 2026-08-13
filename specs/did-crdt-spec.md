@@ -1,7 +1,7 @@
 ---
 title: "SPEC-032: did-crdt — Coordination-Free Decentralised Identifiers via Signed CRDTs"
 id: SPEC-032
-version: 0.2.0
+version: 0.3.0
 status: draft
 created: 2026-03-10
 last_updated: 2026-08-13
@@ -649,6 +649,45 @@ Trace:
 ```
 
 ---
+
+```
+REQ-015: alsoKnownAs Alias Set
+
+The system SHALL maintain a set of `alsoKnownAs` URIs as a last-writer-wins
+register over the WHOLE set, and SHALL project it as the DID Core
+`alsoKnownAs` property.
+
+A SetAlsoKnownAs delta SHALL replace the set entirely. An empty vector SHALL
+withdraw every alias, and a subsequent delta SHALL be able to reinstate a
+previously withdrawn alias.
+
+Reinstatement is the requirement that fixes the CRDT choice. The alias binding
+is two-party: the holder asserts it here, and the application publishes the
+reciprocal record. The application half is reinstatable, so a 2P-Set here --
+the shape used for verification methods -- would make the halves asymmetric,
+leaving a binding the holder had withdrawn permanently unrestorable from one
+end while restorable from the other.
+
+The accepted cost is that concurrent writes from two devices do not union: the
+later timestamp wins wholesale. That is recoverable by writing again, whereas a
+permanently unusable alias is not.
+
+The set SHALL be canonicalised (sorted, deduplicated) before storage, so that
+replicas which agree on the aliases agree on the content hash regardless of the
+order they were written in.
+
+The alias set SHALL be part of observable state for content-addressing
+purposes, so that a change to it moves `versionId`.
+
+Every URI SHALL be recognised in full before any part of the delta is applied,
+per CON-007. A delta carrying any unrecognised URI SHALL be rejected whole.
+
+Trace:
+- TEST-028
+- TEST-029
+- TEST-030
+- CON-007
+```
 
 ## 8. Non-Functional Requirements
 
@@ -1599,6 +1638,52 @@ Verified by:
 
 ---
 
+```
+CON-007: alsoKnownAs URI Set — Recogniser
+
+/// Recognise an alsoKnownAs URI set before any of it is applied.
+fn validate::recognise_also_known_as(uris: &[String]) -> Result<()>
+
+Grammar (ABNF), deliberately narrower than RFC 3986:
+
+  set     = 0*32( uri )                     ; distinct, each 1..=512 bytes
+  uri     = scheme ":" 1*( %x21-7E )        ; no space, no control characters
+  scheme  = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+
+Pre-conditions:
+- None. This is a total recogniser over arbitrary input, and is the trust
+  boundary for this field.
+
+Post-conditions:
+- Ok(()) implies every entry is an absolute URI of printable ASCII, the set is
+  within its cardinality bound, and no entry exceeds its length bound.
+- Err implies NO part of the delta has been applied. Recognition happens in
+  Document::merge before apply_op, so a set containing one bad entry rejects
+  the whole delta rather than admitting the good entries.
+
+Error model:
+- DeltaRejected: cardinality bound exceeded, entry length outside 1..=512,
+  missing or malformed scheme, or an empty / non-printable body.
+
+Why narrower than RFC 3986. These strings are republished by verifiers into
+documents consumed by software this project does not control. The recogniser
+therefore fails closed: it admits the absolute-URI forms the binding actually
+uses (acct:, https:, did:) and refuses anything it cannot classify, rather than
+accepting whatever a permissive parser happens to tolerate. Widening the
+grammar later is a compatible change; narrowing it would not be.
+
+Rejecting relative references is the substantive restriction. An alias is a
+claim about an identity somewhere else, and a relative reference has no meaning
+without a base the document does not carry.
+
+The bounds are bounds, not considered maxima: the set is replicated to every
+peer holding the DID, so an unbounded list is a cheap way to make other people
+store data.
+
+Implements:
+- REQ-015
+```
+
 ## 11. Test Specifications
 
 ### Property-Based Tests (Pure Core)
@@ -2029,6 +2114,77 @@ Step 3 is the fix; steps 4-6 assert the property the fix protects. Before the
 fix, step 2 succeeded and step 6 saw ONLY the injected array.
 ```
 
+```
+TEST-028: alsoKnownAs Recogniser (unit)
+
+Covers CON-007 in both directions.
+
+Refusal — each of these is submitted as a single-entry set and MUST be
+rejected, with the document's alias set left empty:
+1. empty string
+2. `hugo@chat.anuna.io` (a bare handle — no scheme)
+3. `/relative/path` (relative reference)
+4. `1nvalid:x` (scheme does not start with a letter)
+5. `acct:` (empty body)
+6. `acct:hugo chat` (space)
+7. `acct:hugo<DEL>x` and `acct:hugo<LF>x` (non-printable)
+
+Whole-delta refusal:
+8. `["acct:ok@x.io", "no-scheme"]` — rejected entirely; the well-formed entry
+   MUST NOT be admitted on its own.
+
+Bounds:
+9. A set of MAX_ALSO_KNOWN_AS + 1 entries is rejected.
+10. A single entry longer than MAX_ALSO_KNOWN_AS_URI_LEN is rejected.
+
+Acceptance — the forms the binding actually uses MUST pass, or the refusal
+cases above prove only that everything is rejected:
+11. `acct:hugo@chat.anuna.io`, `https://chat.anuna.io/u/hugo`, `did:crdt:...`
+```
+
+```
+TEST-029: alsoKnownAs LWW Semantics (unit)
+
+Covers the register behaviour REQ-015 requires, including the property that
+motivated choosing a register over a 2P-Set.
+
+Scenario A — withdrawal and reinstatement:
+1. Set alias A at t=10; assert present.
+2. Set the empty set at t=20; assert withdrawn.
+3. Set alias A again at t=30; assert present.
+
+Step 3 is the one a 2P-Set could not satisfy.
+
+Scenario B — a stale write must not resurrect a withdrawal:
+1. Set alias A at t=20, then the empty set at t=30.
+2. Deliver a Set of [A] stamped t=10 (out-of-order arrival).
+3. Assert: the alias set is still empty.
+
+LWW is only safe here if a delta that merely arrived later, but is stamped
+earlier, loses. A withdrawal that could be undone by out-of-order delivery
+would make withdrawal unreliable, and withdrawal is the half of the binding
+that carries the security weight.
+```
+
+```
+TEST-030: alsoKnownAs Projection and Convergence (unit)
+
+1. Typed projection: after setting one alias, the resolved document's
+   alsoKnownAs equals it, the serialised JSON contains EXACTLY ONE alsoKnownAs
+   member, and re-parsing yields the alias. (The single-member assertion is the
+   regression guard against BUG-001's duplicate-member failure, which is how
+   this property behaved before it was typed.)
+2. Empty is absent: with no aliases set, the serialised document has no
+   alsoKnownAs member at all, rather than an empty array.
+3. Canonicalisation: two replicas that write the same aliases in different
+   orders, one with a duplicate entry, reach an identical alias set AND an
+   identical content_hash.
+4. versionId moves: setting an alias changes the resolved
+   didDocumentMetadata.versionId. Without this the alias set would be outside
+   observable state and a consumer caching on versionId would never observe a
+   withdrawal.
+```
+
 ## 12. Purity Boundary Map
 
 ### Pure Core (no I/O, no shared state, deterministic)
@@ -2166,6 +2322,7 @@ REQ-011 (Library API)          → TEST-013          → lib.rs           → (n
 REQ-012 (Service Mode)         → TEST-014          → service.rs       → OBS-002, OBS-005
 REQ-013 (DHT Registration)     → TEST-022          → sync/dht.rs      → OBS-005
 REQ-014 (Cold-Start Resolution)→ TEST-023          → sync/dht.rs, sync/live.rs → OBS-005
+REQ-015 (alsoKnownAs)          → TEST-028, TEST-029, TEST-030 → crdt.rs, validate.rs, document.rs → OBS-004
 
 NFR-001 (Convergence Latency)  → TEST-015          → sync.rs          → OBS-001
 NFR-002 (Offline Tolerance)    → TEST-016          → document.rs      → OBS-001
@@ -2534,7 +2691,8 @@ seat a reserved key directly into state; admission-time rejection alone leaves
 that path open.
 
 alsoKnownAs is reserved by this fix. It is a DID Core property and therefore
-requires a typed field rather than an untyped passthrough.
+requires a typed field rather than an untyped passthrough -- delivered as
+REQ-015 / CON-007, which is why the reservation does not remove a capability.
 
 Trace:
 - REQ-009

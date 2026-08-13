@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::core::admission::{AdmissionResult, RejectReason};
 use crate::core::causal::verify_causal;
 use crate::core::crdt::{
-    ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods,
+    ActiveKey, AlsoKnownAs, Deactivated, DocumentData, Revocations, RevokedVerificationMethods,
     ServiceEndpoints, ServiceEntry, VerificationMethodEntry, VerificationMethods,
 };
 use crate::core::dag::DeltaDag;
@@ -53,6 +53,9 @@ pub struct Document {
 
     /// LWW-Map of arbitrary document metadata.
     pub(crate) document_data: DocumentData,
+
+    /// LWW-Register holding the whole `alsoKnownAs` URI set.
+    pub(crate) also_known_as: AlsoKnownAs,
 
     /// Max-Register holding the currently-active key reference.
     pub(crate) active_key: ActiveKey,
@@ -112,6 +115,10 @@ struct DocumentRepr {
     verification_methods: VerificationMethods,
     service_endpoints: ServiceEndpoints,
     document_data: DocumentData,
+    // Defaulted: state serialised before `alsoKnownAs` existed must still load,
+    // and an absent set is exactly an empty one.
+    #[serde(default)]
+    also_known_as: AlsoKnownAs,
     active_key: ActiveKey,
     revocations: Revocations,
     revoked_verification_methods: RevokedVerificationMethods,
@@ -147,6 +154,7 @@ impl TryFrom<DocumentRepr> for Document {
             verification_methods: r.verification_methods,
             service_endpoints: r.service_endpoints,
             document_data: r.document_data,
+            also_known_as: r.also_known_as,
             active_key: r.active_key,
             revocations: r.revocations,
             revoked_verification_methods: r.revoked_verification_methods,
@@ -306,6 +314,7 @@ impl Document {
             verification_methods: VerificationMethods::new(),
             service_endpoints: ServiceEndpoints::new(),
             document_data: DocumentData::new(),
+            also_known_as: AlsoKnownAs::new(),
             active_key: ActiveKey::new(),
             revocations: Revocations::new(),
             revoked_verification_methods: RevokedVerificationMethods::new(),
@@ -373,6 +382,14 @@ impl Document {
         //     the delta never enters the log; see
         //     `resolve::RESERVED_DOCUMENT_PROPERTIES` for why the projection
         //     ALSO filters.
+        // 1a-bis. Recognise the alsoKnownAs set in full before any of it is
+        //     applied. These strings are republished by verifiers into
+        //     documents consumed by software this project does not control, so
+        //     they are recognised at the boundary rather than sanitised later.
+        if let DeltaOp::SetAlsoKnownAs { uris } = &delta.op {
+            crate::core::validate::recognise_also_known_as(uris)?;
+        }
+
         if let DeltaOp::SetDocumentData { key, .. } = &delta.op {
             if crate::core::resolve::is_reserved_document_property(key) {
                 return Err(Error::DeltaRejected(format!(
@@ -559,6 +576,7 @@ impl Document {
         self.verification_methods.merge(other.verification_methods);
         self.service_endpoints.merge(other.service_endpoints);
         self.document_data.merge(other.document_data);
+        self.also_known_as.merge(other.also_known_as);
         self.active_key.merge(other.active_key);
         self.revocations.merge(other.revocations);
         self.revoked_verification_methods
@@ -884,6 +902,8 @@ impl Document {
                 });
             }
 
+            doc.also_known_as = self.also_known_as.entries().to_vec();
+
             // Map LWW document data into the extra flat map, refusing anything
             // that would collide with a DID Core property.
             //
@@ -918,6 +938,7 @@ impl Document {
                 &vm_entries,
                 &svc_entries,
                 &data_entries,
+                self.also_known_as.entries(),
                 self.revocations.entries(),
                 self.revoked_verification_methods.entries(),
                 self.active_key.current(),
@@ -1141,6 +1162,9 @@ impl Document {
                         _ => None,
                     });
                 self.service_endpoints.apply_remove(&observed, timestamp);
+            }
+            DeltaOp::SetAlsoKnownAs { uris } => {
+                self.also_known_as.set(uris.clone(), timestamp);
             }
             DeltaOp::SetDocumentData { key, value } => {
                 self.document_data
@@ -1571,6 +1595,7 @@ mod tests {
             verification_methods: crate::core::crdt::VerificationMethods::new(),
             service_endpoints: crate::core::crdt::ServiceEndpoints::new(),
             document_data: crate::core::crdt::DocumentData::new(),
+            also_known_as: crate::core::crdt::AlsoKnownAs::new(),
             active_key: crate::core::crdt::ActiveKey::new(),
             revocations: crate::core::crdt::Revocations::new(),
             revoked_verification_methods: crate::core::crdt::RevokedVerificationMethods::new(),
@@ -1970,7 +1995,171 @@ mod tests {
         merge_op(&mut doc, op, ts, &signer).expect("delta under 64 KiB should be accepted");
     }
 
+    // ── alsoKnownAs ───────────────────────────────────────────────────────────
+
+    fn set_aka(doc: &mut Document, uris: &[&str], ms: u64) -> Result<()> {
+        let signer = doc.verification_methods.entries()[0].id.clone();
+        merge_op(
+            doc,
+            DeltaOp::SetAlsoKnownAs {
+                uris: uris.iter().map(|s| (*s).to_owned()).collect(),
+            },
+            HlcTimestamp {
+                wall_ms: ms,
+                logical: 0,
+                node_id: 1,
+            },
+            &signer,
+        )
+    }
+
     #[test]
+    fn also_known_as_projects_as_a_typed_property() {
+        let (mut doc, _) = make_doc();
+        set_aka(&mut doc, &["acct:hugo@chat.anuna.io"], 10).unwrap();
+
+        let served = doc.resolve().unwrap().did_document.unwrap();
+        assert_eq!(served.also_known_as, vec!["acct:hugo@chat.anuna.io"]);
+
+        // Exactly one member, unlike the documentData passthrough this replaced.
+        let text = serde_json::to_string(&served).unwrap();
+        assert_eq!(text.matches("\"alsoKnownAs\":").count(), 1);
+        let reparsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            reparsed["alsoKnownAs"],
+            serde_json::json!(["acct:hugo@chat.anuna.io"])
+        );
+    }
+
+    #[test]
+    fn absent_when_empty_rather_than_an_empty_array() {
+        let (doc, _) = make_doc();
+        let served = doc.resolve().unwrap().did_document.unwrap();
+        let reparsed: Value =
+            serde_json::from_str(&serde_json::to_string(&served).unwrap()).unwrap();
+        assert!(reparsed.get("alsoKnownAs").is_none());
+    }
+
+    #[test]
+    fn a_withdrawn_alias_can_be_reinstated() {
+        // The reason this is an LWW register over the whole set rather than the
+        // 2P-Set used for keys. cbcl-bus's WebFinger store can reinstate a
+        // withdrawn alias; if the holder's half could not, a binding either side
+        // withdrew would be permanently unrestorable from one end only.
+        let (mut doc, _) = make_doc();
+        let alias = "acct:hugo@chat.anuna.io";
+
+        set_aka(&mut doc, &[alias], 10).unwrap();
+        set_aka(&mut doc, &[], 20).unwrap();
+        assert!(doc.also_known_as.entries().is_empty(), "withdrawn");
+
+        set_aka(&mut doc, &[alias], 30).unwrap();
+        assert_eq!(doc.also_known_as.entries(), [alias], "reinstated");
+    }
+
+    #[test]
+    fn a_stale_write_does_not_resurrect_a_withdrawn_alias() {
+        // LWW is only safe here if an out-of-order delivery loses. A withdrawal
+        // that could be undone by a delta that merely arrived later would make
+        // withdrawal unreliable, which is the half of the binding that matters.
+        let (mut doc, _) = make_doc();
+        set_aka(&mut doc, &["acct:hugo@chat.anuna.io"], 20).unwrap();
+        set_aka(&mut doc, &[], 30).unwrap();
+
+        set_aka(&mut doc, &["acct:hugo@chat.anuna.io"], 10).unwrap();
+        assert!(
+            doc.also_known_as.entries().is_empty(),
+            "a delta older than the withdrawal must not reinstate the alias"
+        );
+    }
+
+    #[test]
+    fn the_set_is_canonicalised_so_replicas_agree() {
+        // Two replicas writing the same aliases in different order must reach
+        // identical state, or versionId would differ between replicas that agree.
+        let (mut a, _) = make_doc();
+        let (mut b, _) = make_doc();
+        set_aka(&mut a, &["did:crdt:zzz", "acct:hugo@chat.anuna.io"], 10).unwrap();
+        set_aka(
+            &mut b,
+            &["acct:hugo@chat.anuna.io", "did:crdt:zzz", "did:crdt:zzz"],
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(a.also_known_as.entries(), b.also_known_as.entries());
+        assert_eq!(a.content_hash().unwrap(), b.content_hash().unwrap());
+    }
+
+    #[test]
+    fn changing_aliases_moves_the_version_id() {
+        // The alias set is observable state, so it must be inside the content
+        // hash. If it were not, a consumer caching on versionId would never see
+        // an alias withdrawal.
+        let (mut doc, _) = make_doc();
+        let before = doc.resolve().unwrap().did_document_metadata.version_id;
+        set_aka(&mut doc, &["acct:hugo@chat.anuna.io"], 10).unwrap();
+        let after = doc.resolve().unwrap().did_document_metadata.version_id;
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn malformed_aliases_are_refused_at_admission() {
+        let (mut doc, _) = make_doc();
+        for (uri, why) in [
+            ("", "empty"),
+            (
+                "hugo@chat.anuna.io",
+                "no scheme — a bare handle is not a URI",
+            ),
+            ("/relative/path", "relative reference has no base here"),
+            ("1nvalid:x", "scheme must start with a letter"),
+            ("acct:", "empty body"),
+            ("acct:hugo chat", "space"),
+            ("acct:hugo\u{7f}x", "DEL is not printable"),
+            ("acct:hugo\nx", "control character"),
+        ] {
+            assert!(
+                set_aka(&mut doc, &[uri], 10).is_err(),
+                "{uri:?} must be refused ({why})"
+            );
+        }
+        // And the whole delta is refused, not just the offending entry.
+        assert!(set_aka(&mut doc, &["acct:ok@x.io", "no-scheme"], 10).is_err());
+        assert!(doc.also_known_as.entries().is_empty());
+    }
+
+    #[test]
+    fn well_formed_aliases_are_admitted() {
+        // The refusal test above is only meaningful if the forms the binding
+        // actually uses pass.
+        let (mut doc, _) = make_doc();
+        set_aka(
+            &mut doc,
+            &[
+                "acct:hugo@chat.anuna.io",
+                "https://chat.anuna.io/u/hugo",
+                "did:crdt:a9baa8e5",
+            ],
+            10,
+        )
+        .unwrap();
+        assert_eq!(doc.also_known_as.entries().len(), 3);
+    }
+
+    #[test]
+    fn an_oversized_alias_set_is_refused() {
+        let (mut doc, _) = make_doc();
+        let many: Vec<String> = (0..=crate::core::validate::MAX_ALSO_KNOWN_AS)
+            .map(|i| format!("acct:user{i}@x.io"))
+            .collect();
+        let refs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        assert!(set_aka(&mut doc, &refs, 10).is_err());
+
+        let long = format!("acct:{}@x.io", "a".repeat(600));
+        assert!(set_aka(&mut doc, &[&long], 10).is_err());
+    }
+
     // ── documentData must not shadow DID Core properties ──────────────────────
     #[test]
     fn reserved_document_data_key_is_refused_at_admission() {

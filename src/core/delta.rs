@@ -127,6 +127,12 @@ pub enum DeltaOp {
     },
     /// Remove a service endpoint (OR-Set remove).
     RemoveServiceEndpoint { id: String },
+    /// Replace the `alsoKnownAs` URI set (LWW-Register over the whole set).
+    ///
+    /// Replacement, not add/remove: the register holds the whole set so a
+    /// withdrawn alias can be reinstated later. An empty vector withdraws every
+    /// alias, which is the holder's half of unbinding an account.
+    SetAlsoKnownAs { uris: Vec<String> },
     /// Set a key in the document data LWW-Map.
     SetDocumentData {
         key: String,

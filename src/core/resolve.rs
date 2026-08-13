@@ -159,6 +159,15 @@ pub struct DidDocument {
 
     pub id: String,
 
+    /// Other identifiers the controller asserts refer to the same subject.
+    ///
+    /// A typed field rather than a `documentData` passthrough. It is a DID Core
+    /// property, so an untyped entry of this name would emit a duplicate member
+    /// and let the meaning of the document be settled by the consumer's parser
+    /// — see [`RESERVED_DOCUMENT_PROPERTIES`] and BUG-001.
+    #[serde(rename = "alsoKnownAs", default, skip_serializing_if = "Vec::is_empty")]
+    pub also_known_as: Vec<String>,
+
     #[serde(
         rename = "verificationMethod",
         default,
@@ -219,6 +228,7 @@ impl DidDocument {
         Self {
             context: Self::base_context(),
             id: did.to_string(),
+            also_known_as: Vec::new(),
             verification_method: Vec::new(),
             authentication: Vec::new(),
             assertion_method: Vec::new(),
@@ -426,7 +436,6 @@ mod tests {
 
     // ── ResolutionResult serialisation ─────────────────────────────────────────
 
-    #[test]
     #[test]
     fn resolution_result_has_three_parts() {
         let result = ResolutionResult {

@@ -10,6 +10,7 @@
 //! | serviceEndpoints    | OR-Set       | Add/remove with causal context         |
 //! | documentData        | LWW-Map      | Per-field last-writer-wins register    |
 //! | activeKey           | Max-Register | Highest seq wins, tiebreak on key hash |
+//! | alsoKnownAs         | LWW-Register | Whole set replaced; re-add must stay possible |
 //! | revocations         | G-Set        | Grow-only set of revoked credential IDs|
 //! | revokedVMs          | G-Set        | Grow-only set of revoked key IDs (2P-Set remove half) |
 //! | deactivated         | Max-Register | Boolean latch — once true, stays true  |
@@ -506,6 +507,60 @@ impl Deactivated {
     /// Merge another latch into this one (boolean OR — idempotent).
     pub fn merge(&mut self, other: Self) {
         self.0 |= other.0;
+    }
+}
+
+// ── AlsoKnownAs (LWW-Register over the whole URI set) ─────────────────────────
+
+/// The `alsoKnownAs` URI set, held as ONE last-writer-wins register.
+///
+/// A register over the whole set, rather than the grow-set-plus-tombstone-set
+/// shape used for verification methods. That difference is deliberate. A 2P-Set
+/// can never re-add a removed element, and the application half of this binding
+/// (cbcl-bus's WebFinger store) supports reinstating a withdrawn alias. A 2P-Set
+/// here would make the two halves asymmetric: a binding the holder withdrew
+/// could never be restored, while the authority's could.
+///
+/// The cost is that concurrent writes from two devices do not union — the later
+/// timestamp wins wholesale and the other device's addition is lost. That is
+/// recoverable by writing again; a permanently unusable alias would not be.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AlsoKnownAs(LWWReg<Vec<String>, HlcTimestamp>);
+
+impl AlsoKnownAs {
+    /// Create an empty alias set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the set, witnessed by `timestamp`.
+    ///
+    /// Stale writes (a timestamp not strictly greater than the stored one) are
+    /// no-ops, matching every other LWW field here.
+    ///
+    /// The value is canonicalised — sorted and deduplicated — so two replicas
+    /// that write the same aliases in different order hold identical state and
+    /// therefore produce the same content hash. Without that, `versionId` would
+    /// differ between replicas that agree.
+    pub fn set(&mut self, mut uris: Vec<String>, timestamp: HlcTimestamp) {
+        uris.sort();
+        uris.dedup();
+        self.0.update(uris, timestamp);
+    }
+
+    /// The current alias set, sorted and deduplicated.
+    pub fn entries(&self) -> &[String] {
+        &self.0.val
+    }
+
+    /// Merge another register into this one; the later timestamp wins.
+    ///
+    /// Uses `update` rather than `CvRDT::merge` for the same reason
+    /// [`DocumentData::merge`] does: it is defined for every input, including
+    /// the equal-marker-different-value case a hostile or buggy peer can
+    /// present.
+    pub fn merge(&mut self, other: Self) {
+        self.0.update(other.0.val, other.0.marker);
     }
 }
 
