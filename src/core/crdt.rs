@@ -10,6 +10,7 @@
 //! | serviceEndpoints    | OR-Set       | Add/remove with causal context         |
 //! | documentData        | LWW-Map      | Per-field last-writer-wins register    |
 //! | activeKey           | Max-Register | Highest seq wins, tiebreak on key hash |
+//! | alsoKnownAs         | LWW-Register | Whole set replaced; re-add must stay possible |
 //! | revocations         | G-Set        | Grow-only set of revoked credential IDs|
 //! | revokedVMs          | G-Set        | Grow-only set of revoked key IDs (2P-Set remove half) |
 //! | deactivated         | Max-Register | Boolean latch — once true, stays true  |
@@ -20,7 +21,7 @@ use crdts::{CvRDT, GSet, LWWReg};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::delta::{SuiteType, VerificationRelationship, default_relationships};
+use crate::core::delta::{default_relationships, SuiteType, VerificationRelationship};
 use crate::core::hlc::HlcTimestamp;
 
 /// A node identifier — the lower 64 bits of a node's public-key hash, carried
@@ -73,7 +74,12 @@ impl VerificationMethods {
         suite_type: SuiteType,
         relationships: Vec<VerificationRelationship>,
     ) {
-        self.0.insert(VerificationMethodEntry { id, public_key_multibase, suite_type, relationships });
+        self.0.insert(VerificationMethodEntry {
+            id,
+            public_key_multibase,
+            suite_type,
+            relationships,
+        });
     }
 
     /// Returns `true` if an entry whose `id` field matches `id` exists.
@@ -227,7 +233,10 @@ struct ServiceEndpointsRepr {
 }
 
 impl Serialize for ServiceEndpoints {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         ServiceEndpointsRepr {
             live: self.live.iter().map(|(d, e)| (*d, e.clone())).collect(),
             context: self.context.iter().map(|(n, d)| (*n, *d)).collect(),
@@ -237,7 +246,9 @@ impl Serialize for ServiceEndpoints {
 }
 
 impl<'de> Deserialize<'de> for ServiceEndpoints {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let repr = ServiceEndpointsRepr::deserialize(deserializer)?;
         Ok(ServiceEndpoints {
             live: repr.live.into_iter().collect(),
@@ -359,7 +370,10 @@ impl DocumentData {
     pub fn set(&mut self, key: String, value: Value, timestamp: HlcTimestamp) {
         self.0
             .entry(key)
-            .or_insert_with(|| LWWReg { val: Value::Null, marker: HlcTimestamp::default() })
+            .or_insert_with(|| LWWReg {
+                val: Value::Null,
+                marker: HlcTimestamp::default(),
+            })
             .update(value, timestamp);
     }
 
@@ -381,7 +395,10 @@ impl DocumentData {
         for (key, reg) in other.0 {
             self.0
                 .entry(key)
-                .or_insert_with(|| LWWReg { val: Value::Null, marker: HlcTimestamp::default() })
+                .or_insert_with(|| LWWReg {
+                    val: Value::Null,
+                    marker: HlcTimestamp::default(),
+                })
                 .update(reg.val, reg.marker);
         }
     }
@@ -405,7 +422,10 @@ pub struct ActiveKeyMarker {
 impl ActiveKeyMarker {
     /// Construct a marker by hashing `key_ref` with BLAKE3.
     pub fn new(seq: u64, key_ref: &str) -> Self {
-        Self { seq, key_hash: *blake3::hash(key_ref.as_bytes()).as_bytes() }
+        Self {
+            seq,
+            key_hash: *blake3::hash(key_ref.as_bytes()).as_bytes(),
+        }
     }
 }
 
@@ -419,7 +439,10 @@ pub struct ActiveKey(LWWReg<Option<String>, ActiveKeyMarker>);
 
 impl Default for ActiveKey {
     fn default() -> Self {
-        Self(LWWReg { val: None, marker: ActiveKeyMarker::default() })
+        Self(LWWReg {
+            val: None,
+            marker: ActiveKeyMarker::default(),
+        })
     }
 }
 
@@ -487,6 +510,81 @@ impl Deactivated {
     }
 }
 
+// ── AlsoKnownAs (LWW-Register over the whole URI set) ─────────────────────────
+
+/// The `alsoKnownAs` URI set, held as ONE last-writer-wins register.
+///
+/// Two choices are encoded here, and they are decided by different facts.
+///
+/// **Why not a 2P-Set**, which is the shape used for verification methods: a
+/// 2P-Set can never re-add a removed element. The application half of this
+/// binding (cbcl-bus's WebFinger store) can reinstate a withdrawn alias, so a
+/// 2P-Set would make the halves asymmetric — a binding the holder withdrew
+/// could never be restored, while the authority's could.
+///
+/// **Why a register over the whole set, rather than per-element LWW.** A
+/// whole-set register replaces everything on each write, so two devices editing
+/// concurrently do not union: the later timestamp wins and the other write is
+/// lost. That is only acceptable because the set holds a SINGLE alias — the
+/// stable, derived one. It is computed from the home DID and the account
+/// authority, so it has one writer-of-record and one lifecycle, and "replace the
+/// set" and "change the alias" are the same operation. With one element, a
+/// whole-set register and per-element LWW are indistinguishable.
+///
+/// The cardinality bound in `validate::MAX_ALSO_KNOWN_AS` is a resource bound
+/// against replicated bloat, NOT what keeps the above true. Nothing mechanical
+/// enforces the single-alias shape; it is a property of how aliases are minted.
+// SIMPLIFY: the ceiling is a SECOND independently-managed alias. Two aliases
+// with separate lifecycles (a derived one plus, say, a user-chosen handle)
+// reintroduce lost updates: a write carrying one can silently drop the other,
+// including the derived alias the reciprocal binding depends on. Whole-set
+// replacement assumes read-modify-write, which is the race CRDTs exist to
+// avoid. The upgrade is per-element LWW — `BTreeMap<String, LWWReg<bool,
+// HlcTimestamp>>`, the same primitive `DocumentData` already uses — together
+// with a per-element op, since a whole-set op would have to diff against
+// current state and so reintroduce the read-modify-write it was meant to
+// remove. It also brings tombstones, which cannot be collected without causal
+// stability this design deliberately lacks.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AlsoKnownAs(LWWReg<Vec<String>, HlcTimestamp>);
+
+impl AlsoKnownAs {
+    /// Create an empty alias set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the set, witnessed by `timestamp`.
+    ///
+    /// Stale writes (a timestamp not strictly greater than the stored one) are
+    /// no-ops, matching every other LWW field here.
+    ///
+    /// The value is canonicalised — sorted and deduplicated — so two replicas
+    /// that write the same aliases in different order hold identical state and
+    /// therefore produce the same content hash. Without that, `versionId` would
+    /// differ between replicas that agree.
+    pub fn set(&mut self, mut uris: Vec<String>, timestamp: HlcTimestamp) {
+        uris.sort();
+        uris.dedup();
+        self.0.update(uris, timestamp);
+    }
+
+    /// The current alias set, sorted and deduplicated.
+    pub fn entries(&self) -> &[String] {
+        &self.0.val
+    }
+
+    /// Merge another register into this one; the later timestamp wins.
+    ///
+    /// Uses `update` rather than `CvRDT::merge` for the same reason
+    /// [`DocumentData::merge`] does: it is defined for every input, including
+    /// the equal-marker-different-value case a hostile or buggy peer can
+    /// present.
+    pub fn merge(&mut self, other: Self) {
+        self.0.update(other.0.val, other.0.marker);
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -499,7 +597,12 @@ mod tests {
     #[test]
     fn gset_insert_and_contains() {
         let mut vm = VerificationMethods::new();
-        vm.insert("did:crdt:aa#key-1".into(), "zAbc".into(), SuiteType::default(), default_relationships());
+        vm.insert(
+            "did:crdt:aa#key-1".into(),
+            "zAbc".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
         assert!(vm.contains_id("did:crdt:aa#key-1"));
         assert!(!vm.contains_id("did:crdt:aa#key-2"));
     }
@@ -507,10 +610,20 @@ mod tests {
     #[test]
     fn gset_merge_union() {
         let mut a = VerificationMethods::new();
-        a.insert("k1".into(), "pub1".into(), SuiteType::default(), default_relationships());
+        a.insert(
+            "k1".into(),
+            "pub1".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
 
         let mut b = VerificationMethods::new();
-        b.insert("k2".into(), "pub2".into(), SuiteType::default(), default_relationships());
+        b.insert(
+            "k2".into(),
+            "pub2".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
 
         a.merge(b);
         assert!(a.contains_id("k1"));
@@ -520,7 +633,12 @@ mod tests {
     #[test]
     fn gset_merge_idempotent() {
         let mut a = VerificationMethods::new();
-        a.insert("k1".into(), "pub1".into(), SuiteType::default(), default_relationships());
+        a.insert(
+            "k1".into(),
+            "pub1".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
         let snapshot = a.clone();
 
         a.merge(snapshot);
@@ -530,7 +648,12 @@ mod tests {
     #[test]
     fn gset_grow_only_no_remove() {
         let mut a = VerificationMethods::new();
-        a.insert("k1".into(), "pub1".into(), SuiteType::default(), default_relationships());
+        a.insert(
+            "k1".into(),
+            "pub1".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
 
         let mut b = VerificationMethods::new();
         // B merges A, then A is empty-merged — B still has k1
@@ -615,7 +738,11 @@ mod tests {
 
     /// A dot at wall-clock `w` from node `n` (logical 0).
     fn dot(w: u64, n: u64) -> Dot {
-        HlcTimestamp { wall_ms: w, logical: 0, node_id: n }
+        HlcTimestamp {
+            wall_ms: w,
+            logical: 0,
+            node_id: n,
+        }
     }
 
     #[test]
@@ -671,7 +798,10 @@ mod tests {
         b.apply_remove(&[dot_b], dot(2, 2));
 
         a.merge(b);
-        assert!(a.contains_id("svc-1"), "concurrent add must win over a remove that never saw it");
+        assert!(
+            a.contains_id("svc-1"),
+            "concurrent add must win over a remove that never saw it"
+        );
     }
 
     #[test]
@@ -687,7 +817,10 @@ mod tests {
         b.apply_remove(&[dot_a], dot(2, 2)); // …and removed it.
 
         a.merge(b);
-        assert!(!a.contains_id("svc-1"), "a remove that observed the add must win");
+        assert!(
+            !a.contains_id("svc-1"),
+            "a remove that observed the add must win"
+        );
     }
 
     #[test]
@@ -713,7 +846,11 @@ mod tests {
     // ── DocumentData ──────────────────────────────────────────────────────────
 
     fn ts(wall: u64) -> HlcTimestamp {
-        HlcTimestamp { wall_ms: wall, logical: 0, node_id: 0 }
+        HlcTimestamp {
+            wall_ms: wall,
+            logical: 0,
+            node_id: 0,
+        }
     }
 
     #[test]

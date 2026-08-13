@@ -34,11 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let defaults = ServerConfig::default();
 
-    let dht_relay_url = std::env::var("DHT_RELAY_URL")
-        .unwrap_or_else(|_| defaults.dht_relay_url.clone());
+    let dht_relay_url =
+        std::env::var("DHT_RELAY_URL").unwrap_or_else(|_| defaults.dht_relay_url.clone());
 
-    let disable_dht_publish =
-        std::env::var("DISABLE_DHT_PUBLISH").ok().as_deref() == Some("true");
+    let disable_dht_publish = std::env::var("DISABLE_DHT_PUBLISH").ok().as_deref() == Some("true");
 
     let resolve_timeout_ms = std::env::var("RESOLVE_TIMEOUT_MS")
         .ok()

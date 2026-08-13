@@ -33,10 +33,7 @@ async fn put_packet(
     StatusCode::OK
 }
 
-async fn get_packet(
-    Path(pubkey): Path<String>,
-    State(store): State<Store>,
-) -> impl IntoResponse {
+async fn get_packet(Path(pubkey): Path<String>, State(store): State<Store>) -> impl IntoResponse {
     match store.lock().unwrap().get(&pubkey) {
         Some(bytes) => (StatusCode::OK, bytes.clone()).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),

@@ -180,7 +180,11 @@ mod tests {
 
     /// A delta signed by `key-0` with the given op and parents.
     fn signed(op: DeltaOp, parents: Vec<DeltaHash>, n: u64) -> SignedDelta {
-        let ts = HlcTimestamp { wall_ms: n, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: n,
+            logical: 0,
+            node_id: 1,
+        };
         SignedDelta::new_with_parents(did(), op, ts, parents, key0(), &signing()).unwrap()
     }
 
@@ -232,7 +236,13 @@ mod tests {
         let g = signed(genesis_op(), vec![], 0);
         let gh = dag.insert(g).unwrap();
         // A later op signed by key-0, with genesis in its past.
-        let d = signed(DeltaOp::RevokeCredential { credential_id: "c".into() }, vec![gh], 1);
+        let d = signed(
+            DeltaOp::RevokeCredential {
+                credential_id: "c".into(),
+            },
+            vec![gh],
+            1,
+        );
         assert_eq!(verify_causal(&d, &dag), AdmissionResult::Valid);
     }
 
@@ -242,7 +252,11 @@ mod tests {
         let mut dag = DeltaDag::new();
         let g = signed(genesis_op(), vec![], 0);
         let gh = dag.insert(g).unwrap();
-        let r = signed(DeltaOp::RevokeVerificationMethod { key_id: key0() }, vec![gh], 1);
+        let r = signed(
+            DeltaOp::RevokeVerificationMethod { key_id: key0() },
+            vec![gh],
+            1,
+        );
         let rh = dag.insert(r).unwrap();
         let d = signed(DeltaOp::Deactivate, vec![rh], 2);
         assert_eq!(
@@ -260,9 +274,19 @@ mod tests {
         let mut dag = DeltaDag::new();
         let g = signed(genesis_op(), vec![], 0);
         let gh = dag.insert(g).unwrap();
-        let d = signed(DeltaOp::RevokeCredential { credential_id: "c".into() }, vec![gh.clone()], 1);
+        let d = signed(
+            DeltaOp::RevokeCredential {
+                credential_id: "c".into(),
+            },
+            vec![gh.clone()],
+            1,
+        );
         let _revoke = dag
-            .insert(signed(DeltaOp::RevokeVerificationMethod { key_id: key0() }, vec![gh], 2))
+            .insert(signed(
+                DeltaOp::RevokeVerificationMethod { key_id: key0() },
+                vec![gh],
+                2,
+            ))
             .unwrap();
         assert_eq!(verify_causal(&d, &dag), AdmissionResult::Valid);
     }
@@ -273,7 +297,10 @@ mod tests {
         let dag = DeltaDag::new();
         let missing = DeltaHash("deadbeef".into());
         let d = signed(DeltaOp::Deactivate, vec![missing.clone()], 1);
-        assert_eq!(verify_causal(&d, &dag), AdmissionResult::Unknown(vec![missing]));
+        assert_eq!(
+            verify_causal(&d, &dag),
+            AdmissionResult::Unknown(vec![missing])
+        );
     }
 
     #[test]
@@ -281,11 +308,20 @@ mod tests {
         // Build genesis, but verify D before inserting genesis, then after.
         let g = signed(genesis_op(), vec![], 0);
         let gh = g.content_hash().unwrap();
-        let d = signed(DeltaOp::RevokeCredential { credential_id: "c".into() }, vec![gh.clone()], 1);
+        let d = signed(
+            DeltaOp::RevokeCredential {
+                credential_id: "c".into(),
+            },
+            vec![gh.clone()],
+            1,
+        );
 
         let mut dag = DeltaDag::new();
         // Before the ancestor arrives: Unknown, asking for genesis.
-        assert_eq!(verify_causal(&d, &dag), AdmissionResult::Unknown(vec![gh.clone()]));
+        assert_eq!(
+            verify_causal(&d, &dag),
+            AdmissionResult::Unknown(vec![gh.clone()])
+        );
         // After it arrives: resolves upward to Valid (monotone).
         dag.insert(g).unwrap();
         assert_eq!(verify_causal(&d, &dag), AdmissionResult::Valid);
@@ -318,7 +354,13 @@ mod tests {
         let gh = dag.insert(g).unwrap();
         let deact = signed(DeltaOp::Deactivate, vec![gh], 1);
         let dh = dag.insert(deact).unwrap();
-        let d = signed(DeltaOp::RevokeCredential { credential_id: "c".into() }, vec![dh], 2);
+        let d = signed(
+            DeltaOp::RevokeCredential {
+                credential_id: "c".into(),
+            },
+            vec![dh],
+            2,
+        );
         assert_eq!(
             verify_causal(&d, &dag),
             AdmissionResult::Invalid(RejectReason::Deactivated)

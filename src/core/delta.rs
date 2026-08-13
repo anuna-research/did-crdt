@@ -120,11 +120,24 @@ pub enum DeltaOp {
         relationships: Vec<VerificationRelationship>,
     },
     /// Add a service endpoint (OR-Set insert).
-    AddServiceEndpoint { id: String, service_type: String, endpoint: String },
+    AddServiceEndpoint {
+        id: String,
+        service_type: String,
+        endpoint: String,
+    },
     /// Remove a service endpoint (OR-Set remove).
     RemoveServiceEndpoint { id: String },
+    /// Replace the `alsoKnownAs` URI set (LWW-Register over the whole set).
+    ///
+    /// Replacement, not add/remove: the register holds the whole set so a
+    /// withdrawn alias can be reinstated later. An empty vector withdraws every
+    /// alias, which is the holder's half of unbinding an account.
+    SetAlsoKnownAs { uris: Vec<String> },
     /// Set a key in the document data LWW-Map.
-    SetDocumentData { key: String, value: serde_json::Value },
+    SetDocumentData {
+        key: String,
+        value: serde_json::Value,
+    },
     /// Rotate the active key (Max-Register update).
     RotateKey { seq: u64, key_ref: String },
     /// Add a credential ID to the revocation G-Set.
@@ -231,7 +244,14 @@ impl SignedDelta {
         verification_method: String,
         signing_key: &SigningKey,
     ) -> Result<Self> {
-        Self::new_with_parents(did, op, timestamp, Vec::new(), verification_method, signing_key)
+        Self::new_with_parents(
+            did,
+            op,
+            timestamp,
+            Vec::new(),
+            verification_method,
+            signing_key,
+        )
     }
 
     /// Construct and sign a new delta committing to the given causal `parents`
@@ -260,14 +280,18 @@ impl SignedDelta {
             SigningKey::Ed25519(sk) => {
                 use ed25519_dalek::Signer as _;
                 let sig: ed25519_dalek::Signature = sk.sign(&input);
-                let encoded =
-                    format!("u{}", Base64UrlUnpadded::encode_string(sig.to_bytes().as_ref()));
+                let encoded = format!(
+                    "u{}",
+                    Base64UrlUnpadded::encode_string(sig.to_bytes().as_ref())
+                );
                 (SuiteType::Ed25519Signature2020, encoded)
             }
             SigningKey::Secp256k1(sk) => {
                 let sig: k256::ecdsa::Signature = sk.sign(&input);
-                let encoded =
-                    format!("u{}", Base64UrlUnpadded::encode_string(sig.to_bytes().as_ref()));
+                let encoded = format!(
+                    "u{}",
+                    Base64UrlUnpadded::encode_string(sig.to_bytes().as_ref())
+                );
                 (SuiteType::EcdsaSecp256k1Signature2019, encoded)
             }
         };
@@ -277,7 +301,12 @@ impl SignedDelta {
             timestamp,
             op,
             parents,
-            proof: DeltaProof { suite, verification_method, created, proof_value },
+            proof: DeltaProof {
+                suite,
+                verification_method,
+                created,
+                proof_value,
+            },
         })
     }
 
@@ -392,13 +421,10 @@ pub fn canonical_json(v: &serde_json::Value) -> String {
             format!("{{{}}}", inner)
         }
         Value::Array(arr) => {
-            let inner =
-                arr.iter().map(canonical_json).collect::<Vec<_>>().join(",");
+            let inner = arr.iter().map(canonical_json).collect::<Vec<_>>().join(",");
             format!("[{}]", inner)
         }
-        other => {
-            serde_json::to_string(other).expect("scalar serialisation is infallible")
-        }
+        other => serde_json::to_string(other).expect("scalar serialisation is infallible"),
     }
 }
 
@@ -412,7 +438,10 @@ pub(crate) fn ms_to_iso8601(wall_ms: u64) -> String {
     let secs = wall_ms / 1000;
     let ms = wall_ms % 1000;
     let (y, mo, d, h, mi, s) = secs_to_civil(secs);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", y, mo, d, h, mi, s, ms)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        y, mo, d, h, mi, s, ms
+    )
 }
 
 fn secs_to_civil(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
@@ -505,14 +534,13 @@ mod tests {
     #[test]
     fn unsigned_has_empty_proof_value() {
         let did: Did = format!("did:crdt:{}", "a".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        };
         let op = DeltaOp::Deactivate;
-        let delta = SignedDelta::unsigned(
-            did.clone(),
-            op,
-            ts,
-            format!("{}#key-0", did),
-        );
+        let delta = SignedDelta::unsigned(did.clone(), op, ts, format!("{}#key-0", did));
         assert!(delta.proof.proof_value.is_empty());
         assert_eq!(delta.proof.suite, SuiteType::Ed25519Signature2020);
     }
@@ -522,10 +550,13 @@ mod tests {
     #[test]
     fn signing_input_is_canonical_and_deterministic() {
         let did: Did = format!("did:crdt:{}", "b".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 5_000, logical: 2, node_id: 7 };
+        let ts = HlcTimestamp {
+            wall_ms: 5_000,
+            logical: 2,
+            node_id: 7,
+        };
         let op = DeltaOp::Deactivate;
-        let delta =
-            SignedDelta::unsigned(did.clone(), op, ts, format!("{}#key-0", did));
+        let delta = SignedDelta::unsigned(did.clone(), op, ts, format!("{}#key-0", did));
         let input = delta.signing_input().unwrap();
         // Must be valid UTF-8 JSON with sorted keys at top level.
         let s = std::str::from_utf8(&input).unwrap();
@@ -540,7 +571,11 @@ mod tests {
     #[test]
     fn signing_input_changes_with_different_ops() {
         let did: Did = format!("did:crdt:{}", "c".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 0, logical: 0, node_id: 0 };
+        let ts = HlcTimestamp {
+            wall_ms: 0,
+            logical: 0,
+            node_id: 0,
+        };
         let d1 = SignedDelta::unsigned(
             did.clone(),
             DeltaOp::Deactivate,
@@ -549,7 +584,9 @@ mod tests {
         );
         let d2 = SignedDelta::unsigned(
             did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-1".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-1".to_owned(),
+            },
             ts,
             format!("{}#key-0", did),
         );
@@ -561,26 +598,43 @@ mod tests {
     #[test]
     fn content_hash_is_deterministic_and_hex() {
         let did: Did = format!("did:crdt:{}", "e".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 };
-        let delta =
-            SignedDelta::unsigned(did.clone(), DeltaOp::Deactivate, ts, format!("{}#key-0", did));
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        };
+        let delta = SignedDelta::unsigned(
+            did.clone(),
+            DeltaOp::Deactivate,
+            ts,
+            format!("{}#key-0", did),
+        );
         let h1 = delta.content_hash().unwrap();
         let h2 = delta.content_hash().unwrap();
         assert_eq!(h1, h2, "content hash must be deterministic");
         // BLAKE3-256 hex is 64 lowercase hex chars.
         assert_eq!(h1.0.len(), 64);
-        assert!(h1.0.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert!(h1
+            .0
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
     }
 
     #[test]
     fn content_hash_distinguishes_distinct_deltas() {
         let did: Did = format!("did:crdt:{}", "f".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 0, logical: 0, node_id: 0 };
+        let ts = HlcTimestamp {
+            wall_ms: 0,
+            logical: 0,
+            node_id: 0,
+        };
         let vm = format!("{}#key-0", did);
         let d1 = SignedDelta::unsigned(did.clone(), DeltaOp::Deactivate, ts, vm.clone());
         let d2 = SignedDelta::unsigned(
             did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-1".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-1".to_owned(),
+            },
             ts,
             vm,
         );
@@ -598,16 +652,28 @@ mod tests {
         use ed25519_dalek::SigningKey as DalekKey;
         let sk = SigningKey::Ed25519(DalekKey::from_bytes(&[7u8; 32]));
         let did: Did = format!("did:crdt:{}", "a".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 1, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 1,
+            logical: 0,
+            node_id: 1,
+        };
         let vm = format!("{}#key-0", did);
         // Unsorted, with a duplicate.
-        let parents = vec![DeltaHash("cc".into()), DeltaHash("aa".into()),
-                           DeltaHash("cc".into()), DeltaHash("bb".into())];
-        let d = SignedDelta::new_with_parents(did, DeltaOp::Deactivate, ts, parents, vm, &sk)
-            .unwrap();
+        let parents = vec![
+            DeltaHash("cc".into()),
+            DeltaHash("aa".into()),
+            DeltaHash("cc".into()),
+            DeltaHash("bb".into()),
+        ];
+        let d =
+            SignedDelta::new_with_parents(did, DeltaOp::Deactivate, ts, parents, vm, &sk).unwrap();
         assert_eq!(
             d.parents,
-            vec![DeltaHash("aa".into()), DeltaHash("bb".into()), DeltaHash("cc".into())],
+            vec![
+                DeltaHash("aa".into()),
+                DeltaHash("bb".into()),
+                DeltaHash("cc".into())
+            ],
             "parents must be sorted and deduplicated"
         );
     }
@@ -617,15 +683,34 @@ mod tests {
         use ed25519_dalek::SigningKey as DalekKey;
         let sk = SigningKey::Ed25519(DalekKey::from_bytes(&[8u8; 32]));
         let did: Did = format!("did:crdt:{}", "b".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 1, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 1,
+            logical: 0,
+            node_id: 1,
+        };
         let vm = format!("{}#key-0", did);
         let d0 = SignedDelta::new_with_parents(
-            did.clone(), DeltaOp::Deactivate, ts, vec![], vm.clone(), &sk).unwrap();
+            did.clone(),
+            DeltaOp::Deactivate,
+            ts,
+            vec![],
+            vm.clone(),
+            &sk,
+        )
+        .unwrap();
         let d1 = SignedDelta::new_with_parents(
-            did, DeltaOp::Deactivate, ts, vec![DeltaHash("aa".into())], vm, &sk).unwrap();
+            did,
+            DeltaOp::Deactivate,
+            ts,
+            vec![DeltaHash("aa".into())],
+            vm,
+            &sk,
+        )
+        .unwrap();
         // Different parents ⇒ different signed bytes ⇒ different signature.
         assert_ne!(
-            d0.signing_input().unwrap(), d1.signing_input().unwrap(),
+            d0.signing_input().unwrap(),
+            d1.signing_input().unwrap(),
             "parents must be covered by the signing input"
         );
         assert_ne!(d0.proof.proof_value, d1.proof.proof_value);
@@ -641,7 +726,11 @@ mod tests {
         let signing_key = SigningKey::Ed25519(sk);
 
         let did: Did = format!("did:crdt:{}", "d".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        };
         let vm = format!("{}#key-0", did);
         let delta = SignedDelta::new_genesis(
             did.clone(),
@@ -665,7 +754,11 @@ mod tests {
     #[test]
     fn ed25519_signing_is_deterministic() {
         let did: Did = format!("did:crdt:{}", "e".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        };
         let vm = format!("{}#key-0", did);
 
         // Ed25519 is deterministic — same key + same message → same signature.
@@ -684,14 +777,15 @@ mod tests {
 
     #[test]
     fn secp256k1_sign_and_proof_structure() {
-        let sk = k256::ecdsa::SigningKey::from_bytes(
-            (&[3u8; 32]).into(),
-        )
-        .unwrap();
+        let sk = k256::ecdsa::SigningKey::from_bytes((&[3u8; 32]).into()).unwrap();
         let signing_key = SigningKey::Secp256k1(sk);
 
         let did: Did = format!("did:crdt:{}", "f".repeat(64)).parse().unwrap();
-        let ts = HlcTimestamp { wall_ms: 2_000, logical: 0, node_id: 2 };
+        let ts = HlcTimestamp {
+            wall_ms: 2_000,
+            logical: 0,
+            node_id: 2,
+        };
         let vm = format!("{}#key-0", did);
         let delta = SignedDelta::new_genesis(
             did.clone(),

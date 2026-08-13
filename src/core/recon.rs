@@ -29,7 +29,7 @@ use crate::core::{Error, Result};
 /// When produced with a non-empty `stop` set (the recipient's frontier), the
 /// bundle is pruned to the deltas *between* `target` and what the recipient
 /// already holds — transfer proportional to the divergence, not the history.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClosureBundle {
     /// The head delta this bundle was extracted for.
     pub target: DeltaHash,
@@ -49,8 +49,11 @@ impl DeltaDag {
     /// ancestors would never be fetched, leaving future deltas pending.
     #[must_use]
     pub fn missing_from_frontier(&self, remote_frontier: &[DeltaHash]) -> Vec<DeltaHash> {
-        let mut m: Vec<DeltaHash> =
-            remote_frontier.iter().filter(|h| !self.contains(h)).cloned().collect();
+        let mut m: Vec<DeltaHash> = remote_frontier
+            .iter()
+            .filter(|h| !self.contains(h))
+            .cloned()
+            .collect();
         m.extend(self.incomplete_ancestors());
         m.sort();
         m.dedup();
@@ -68,11 +71,7 @@ impl DeltaDag {
     ///
     /// [`Error::DeltaRejected`] if `target` or a required ancestor is not held
     /// (the local closure is incomplete, so no sound bundle can be built).
-    pub fn extract_closure(
-        &self,
-        target: &DeltaHash,
-        stop: &[DeltaHash],
-    ) -> Result<ClosureBundle> {
+    pub fn extract_closure(&self, target: &DeltaHash, stop: &[DeltaHash]) -> Result<ClosureBundle> {
         let stop: HashSet<&DeltaHash> = stop.iter().collect();
         let mut visited: HashSet<DeltaHash> = HashSet::new();
         let mut deltas: Vec<SignedDelta> = Vec::new();
@@ -93,7 +92,10 @@ impl DeltaDag {
             }
         }
 
-        Ok(ClosureBundle { target: target.clone(), deltas })
+        Ok(ClosureBundle {
+            target: target.clone(),
+            deltas,
+        })
     }
 
     /// The held deltas a peer advertising `peer_frontier` is missing: this
@@ -187,13 +189,19 @@ mod tests {
 
     fn signed(op: DeltaOp, parents: Vec<DeltaHash>, n: u64) -> SignedDelta {
         let vm = format!("{}#key-0", did());
-        let ts = HlcTimestamp { wall_ms: n, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: n,
+            logical: 0,
+            node_id: 1,
+        };
         let key = SigningKey::Ed25519(DalekKey::from_bytes(&[5u8; 32]));
         SignedDelta::new_with_parents(did(), op, ts, parents, vm, &key).unwrap()
     }
 
     fn rc(id: &str) -> DeltaOp {
-        DeltaOp::RevokeCredential { credential_id: id.to_owned() }
+        DeltaOp::RevokeCredential {
+            credential_id: id.to_owned(),
+        }
     }
 
     /// genesis <- a <- b chain; returns (dag, [hg, ha, hb]).
@@ -235,7 +243,11 @@ mod tests {
         let (src, hs) = chain();
         // Recipient already holds up to `a` (frontier = {ha}); only `b` is new.
         let bundle = src.extract_closure(&hs[2], &[hs[1].clone()]).unwrap();
-        assert_eq!(bundle.deltas.len(), 1, "diff-proportional: only the new delta");
+        assert_eq!(
+            bundle.deltas.len(),
+            1,
+            "diff-proportional: only the new delta"
+        );
         assert_eq!(bundle.deltas[0].content_hash().unwrap(), hs[2]);
     }
 
@@ -258,7 +270,11 @@ mod tests {
         let bundle = src.extract_closure(&hs[2], &[]).unwrap();
         let mut dst = DeltaDag::new();
         assert_eq!(dst.merge_bundle(&bundle).unwrap(), 3);
-        assert_eq!(dst.merge_bundle(&bundle).unwrap(), 0, "re-merge adds nothing");
+        assert_eq!(
+            dst.merge_bundle(&bundle).unwrap(),
+            0,
+            "re-merge adds nothing"
+        );
     }
 
     #[test]
@@ -276,7 +292,10 @@ mod tests {
         }
         let mut dst = DeltaDag::new();
         let err = dst.merge_bundle(&bundle).unwrap_err();
-        assert!(matches!(err, Error::DeltaRejected(_)), "tamper must be rejected");
+        assert!(
+            matches!(err, Error::DeltaRejected(_)),
+            "tamper must be rejected"
+        );
     }
 
     #[test]
@@ -294,7 +313,10 @@ mod tests {
         }
         let mut dst = DeltaDag::new();
         let err = dst.merge_bundle(&bundle).unwrap_err();
-        assert!(matches!(err, Error::DeltaRejected(_)), "tampered target must be rejected");
+        assert!(
+            matches!(err, Error::DeltaRejected(_)),
+            "tampered target must be rejected"
+        );
     }
 
     #[test]
@@ -307,13 +329,18 @@ mod tests {
         let child_hash = dag.insert(child).unwrap();
 
         let missing = dag.missing_from_frontier(&[child_hash]);
-        assert!(missing.contains(&absent), "must request the absent ancestor behind the held child");
+        assert!(
+            missing.contains(&absent),
+            "must request the absent ancestor behind the held child"
+        );
     }
 
     #[test]
     fn extract_missing_target_errors() {
         let dag = DeltaDag::new();
-        let err = dag.extract_closure(&DeltaHash("nope".into()), &[]).unwrap_err();
+        let err = dag
+            .extract_closure(&DeltaHash("nope".into()), &[])
+            .unwrap_err();
         assert!(matches!(err, Error::DeltaRejected(_)));
     }
 

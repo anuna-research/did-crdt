@@ -59,7 +59,10 @@ impl BootstrapPolicy {
     /// A policy that bootstraps every DID seen on the mesh (full replica).
     #[must_use]
     pub fn replicate_all() -> Self {
-        Self { wanted: Arc::default(), replicate_all: true }
+        Self {
+            wanted: Arc::default(),
+            replicate_all: true,
+        }
     }
 
     /// Whether this node is willing to genesis-bootstrap `did`.
@@ -140,8 +143,7 @@ pub(crate) fn genesis_bootstrap(
     deltas: Vec<crate::core::delta::SignedDelta>,
 ) -> std::result::Result<(), BootstrapError> {
     // Step 1: find the unique genesis delta.
-    let genesis_deltas: Vec<_> =
-        deltas.iter().filter(|d| d.parents.is_empty()).collect();
+    let genesis_deltas: Vec<_> = deltas.iter().filter(|d| d.parents.is_empty()).collect();
     let genesis = match genesis_deltas.len() {
         0 => return Err(BootstrapError::PartialHistory),
         1 => genesis_deltas[0].clone(),
@@ -154,9 +156,10 @@ pub(crate) fn genesis_bootstrap(
 
     // Step 2: genesis op must be AddVerificationMethod.
     let public_key_multibase = match &genesis.op {
-        DeltaOp::AddVerificationMethod { public_key_multibase, .. } => {
-            public_key_multibase.clone()
-        }
+        DeltaOp::AddVerificationMethod {
+            public_key_multibase,
+            ..
+        } => public_key_multibase.clone(),
         _ => {
             return Err(BootstrapError::BootstrapFailed(
                 "genesis op is not AddVerificationMethod".to_owned(),
@@ -165,10 +168,8 @@ pub(crate) fn genesis_bootstrap(
     };
 
     // Step 3: reconstruct locally and verify DID + genesis hash.
-    let (reconstructed, computed_genesis) =
-        Document::new(&public_key_multibase).map_err(|e| {
-            BootstrapError::BootstrapFailed(format!("Document::new failed: {e}"))
-        })?;
+    let (reconstructed, computed_genesis) = Document::new(&public_key_multibase)
+        .map_err(|e| BootstrapError::BootstrapFailed(format!("Document::new failed: {e}")))?;
 
     if &reconstructed.did != did {
         return Err(BootstrapError::BootstrapFailed(format!(
@@ -176,14 +177,12 @@ pub(crate) fn genesis_bootstrap(
             reconstructed.did
         )));
     }
-    let received_hash =
-        genesis.content_hash().map_err(|e| {
-            BootstrapError::BootstrapFailed(format!("content_hash failed: {e}"))
-        })?;
-    let computed_hash =
-        computed_genesis.content_hash().map_err(|e| {
-            BootstrapError::BootstrapFailed(format!("content_hash failed: {e}"))
-        })?;
+    let received_hash = genesis
+        .content_hash()
+        .map_err(|e| BootstrapError::BootstrapFailed(format!("content_hash failed: {e}")))?;
+    let computed_hash = computed_genesis
+        .content_hash()
+        .map_err(|e| BootstrapError::BootstrapFailed(format!("content_hash failed: {e}")))?;
     if received_hash != computed_hash {
         return Err(BootstrapError::BootstrapFailed(
             "genesis delta hash mismatch".to_owned(),
@@ -194,8 +193,14 @@ pub(crate) fn genesis_bootstrap(
     docs.insert(did.clone(), reconstructed);
 
     // Step 5: apply remaining deltas via the existing retry loop.
-    let remaining: Vec<_> = deltas.into_iter().filter(|d| !d.parents.is_empty()).collect();
-    let fake_msg = SyncMessage::Deltas { did: did.clone(), deltas: remaining };
+    let remaining: Vec<_> = deltas
+        .into_iter()
+        .filter(|d| !d.parents.is_empty())
+        .collect();
+    let fake_msg = SyncMessage::Deltas {
+        did: did.clone(),
+        deltas: remaining,
+    };
     // The DID is now in docs, so merge_inbound takes the known-DID path and the
     // policy is never consulted; deny-all keeps that explicit.
     merge_inbound(docs, fake_msg, &BootstrapPolicy::solicited_only());
@@ -237,7 +242,9 @@ struct GossipState {
 
 impl GossipState {
     fn new() -> Self {
-        Self { seen: HashSet::new() }
+        Self {
+            seen: HashSet::new(),
+        }
     }
 
     /// Record a `(did, hash)` pair.  Returns `true` if it was not yet known.
@@ -267,17 +274,25 @@ impl GossipState {
                 // Unknown state: reconcile by advertising our current frontier so
                 // the peer sends exactly the deltas we lack (REQ-366).
                 match docs.get(&did) {
-                    Some(doc) => {
-                        (vec![SyncMessage::Request { did: did.clone(), frontier: doc.frontier() }], None)
-                    }
+                    Some(doc) => (
+                        vec![SyncMessage::Request {
+                            did: did.clone(),
+                            frontier: doc.frontier(),
+                        }],
+                        None,
+                    ),
                     // Untracked DID: request the full history (empty frontier)
                     // only if this node solicited it or replicates everything.
                     // Otherwise stay silent — requesting histories we would
                     // refuse to merge wastes peer bandwidth (CON-006
                     // §admission control).
-                    None if policy.wants(&did) => {
-                        (vec![SyncMessage::Request { did, frontier: vec![] }], None)
-                    }
+                    None if policy.wants(&did) => (
+                        vec![SyncMessage::Request {
+                            did,
+                            frontier: vec![],
+                        }],
+                        None,
+                    ),
                     None => (vec![], None),
                 }
             }
@@ -343,7 +358,12 @@ impl GossipEngine {
     /// Create a new engine for the given gossip handle, topic, and admission
     /// policy.
     pub fn new(gossip: Gossip, topic: TopicId, policy: BootstrapPolicy) -> Self {
-        Self { gossip, topic, state: GossipState::new(), policy }
+        Self {
+            gossip,
+            topic,
+            state: GossipState::new(),
+            policy,
+        }
     }
 
     // ── outbound ─────────────────────────────────────────────────────────────
@@ -356,14 +376,20 @@ impl GossipEngine {
     /// If the same `(did, hash)` pair was already announced this call is a
     /// no-op (deduplication prevents redundant broadcasts).
     pub async fn announce(&mut self, doc: &Document, clock: HlcTimestamp) -> Result<()> {
-        let hash = doc.content_hash().map_err(|e| GossipError::Hash(e.to_string()))?;
+        let hash = doc
+            .content_hash()
+            .map_err(|e| GossipError::Hash(e.to_string()))?;
         let hash_bytes: Blake3Hash = *hash.as_bytes();
 
         if !self.state.mark_seen(&doc.did, hash_bytes) {
             return Ok(());
         }
 
-        let msg = SyncMessage::Announce { did: doc.did.clone(), hash: hash_bytes, clock };
+        let msg = SyncMessage::Announce {
+            did: doc.did.clone(),
+            hash: hash_bytes,
+            clock,
+        };
         self.do_broadcast(&msg).await
     }
 
@@ -496,14 +522,20 @@ mod tests {
     }
 
     fn signer_node_id() -> u64 {
-        node_id_from_pubkey(DalekKey::from_bytes(&GOSSIP_SEED).verifying_key().as_bytes())
+        node_id_from_pubkey(
+            DalekKey::from_bytes(&GOSSIP_SEED)
+                .verifying_key()
+                .as_bytes(),
+        )
     }
 
     fn make_doc() -> Document {
         let pk_mb = format!(
             "u{}",
             Base64UrlUnpadded::encode_string(
-                DalekKey::from_bytes(&GOSSIP_SEED).verifying_key().as_bytes()
+                DalekKey::from_bytes(&GOSSIP_SEED)
+                    .verifying_key()
+                    .as_bytes()
             )
         );
         let (doc, _) = Document::new(&pk_mb).expect("new() must succeed");
@@ -511,7 +543,11 @@ mod tests {
     }
 
     fn ts(wall_ms: u64) -> HlcTimestamp {
-        HlcTimestamp { wall_ms, logical: 0, node_id: 1 }
+        HlcTimestamp {
+            wall_ms,
+            logical: 0,
+            node_id: 1,
+        }
     }
 
     fn doc_hash(doc: &Document) -> Blake3Hash {
@@ -522,7 +558,9 @@ mod tests {
         let signer = doc.verification_methods.entries()[0].id.clone();
         SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: format!("cred-{}", wall_ms) },
+            DeltaOp::RevokeCredential {
+                credential_id: format!("cred-{}", wall_ms),
+            },
             ts(wall_ms),
             signer,
         )
@@ -588,7 +626,11 @@ mod tests {
         let mut state = GossipState::new();
 
         // Announce a hash we have not seen for a DID we hold.
-        let msg = SyncMessage::Announce { did: doc.did.clone(), hash: [9u8; 32], clock: ts(1) };
+        let msg = SyncMessage::Announce {
+            did: doc.did.clone(),
+            hash: [9u8; 32],
+            clock: ts(1),
+        };
         let (outgoing, deliver) = state.handle(msg, &docs, &deny());
 
         assert!(deliver.is_none());
@@ -596,7 +638,11 @@ mod tests {
         match &outgoing[0] {
             SyncMessage::Request { did, frontier } => {
                 assert_eq!(did, &doc.did);
-                assert_eq!(frontier, &doc.frontier(), "tracked DID → request above our frontier");
+                assert_eq!(
+                    frontier,
+                    &doc.frontier(),
+                    "tracked DID → request above our frontier"
+                );
             }
             other => panic!("expected Request, got {:?}", other),
         }
@@ -610,10 +656,17 @@ mod tests {
         let hash = doc_hash(&doc);
         let mut state = GossipState::new();
 
-        let msg = SyncMessage::Announce { did: doc.did.clone(), hash, clock: ts(1) };
+        let msg = SyncMessage::Announce {
+            did: doc.did.clone(),
+            hash,
+            clock: ts(1),
+        };
         let (outgoing, deliver) = state.handle(msg, &no_docs(), &deny());
 
-        assert!(outgoing.is_empty(), "unsolicited unknown DID must not be requested");
+        assert!(
+            outgoing.is_empty(),
+            "unsolicited unknown DID must not be requested"
+        );
         assert!(deliver.is_none());
     }
 
@@ -626,7 +679,11 @@ mod tests {
         let policy = BootstrapPolicy::solicited_only();
         policy.add_wanted(&doc.did);
 
-        let msg = SyncMessage::Announce { did: doc.did.clone(), hash, clock: ts(1) };
+        let msg = SyncMessage::Announce {
+            did: doc.did.clone(),
+            hash,
+            clock: ts(1),
+        };
         let (outgoing, deliver) = state.handle(msg, &no_docs(), &policy);
 
         assert!(deliver.is_none());
@@ -634,7 +691,10 @@ mod tests {
         match &outgoing[0] {
             SyncMessage::Request { did, frontier } => {
                 assert_eq!(did, &doc.did);
-                assert!(frontier.is_empty(), "wanted untracked DID → request full history");
+                assert!(
+                    frontier.is_empty(),
+                    "wanted untracked DID → request full history"
+                );
             }
             other => panic!("expected Request, got {:?}", other),
         }
@@ -647,7 +707,11 @@ mod tests {
         let hash = doc_hash(&doc);
         let mut state = GossipState::new();
 
-        let msg = SyncMessage::Announce { did: doc.did.clone(), hash, clock: ts(1) };
+        let msg = SyncMessage::Announce {
+            did: doc.did.clone(),
+            hash,
+            clock: ts(1),
+        };
         let (outgoing, _) = state.handle(msg, &no_docs(), &BootstrapPolicy::replicate_all());
 
         assert_eq!(outgoing.len(), 1);
@@ -664,7 +728,11 @@ mod tests {
         let mut state = GossipState::new();
         state.mark_seen(&doc.did, hash);
 
-        let msg = SyncMessage::Announce { did: doc.did.clone(), hash, clock: ts(1) };
+        let msg = SyncMessage::Announce {
+            did: doc.did.clone(),
+            hash,
+            clock: ts(1),
+        };
         let (outgoing, deliver) = state.handle(msg, &no_docs(), &deny());
 
         assert!(outgoing.is_empty(), "dedup: no outgoing on second ANNOUNCE");
@@ -678,7 +746,10 @@ mod tests {
         let doc = make_doc();
         let mut state = GossipState::new();
 
-        let msg = SyncMessage::Request { did: doc.did.clone(), frontier: vec![] };
+        let msg = SyncMessage::Request {
+            did: doc.did.clone(),
+            frontier: vec![],
+        };
         let (outgoing, deliver) = state.handle(msg, &no_docs(), &deny());
 
         assert!(outgoing.is_empty());
@@ -692,7 +763,10 @@ mod tests {
         let mut state = GossipState::new();
 
         // Empty frontier ⇒ peer has nothing ⇒ send the whole history (genesis).
-        let msg = SyncMessage::Request { did: doc.did.clone(), frontier: vec![] };
+        let msg = SyncMessage::Request {
+            did: doc.did.clone(),
+            frontier: vec![],
+        };
         let (outgoing, deliver) = state.handle(msg, &docs, &deny());
 
         assert!(deliver.is_none());
@@ -713,7 +787,10 @@ mod tests {
         let mut state = GossipState::new();
 
         // Peer already holds our frontier ⇒ nothing to send.
-        let msg = SyncMessage::Request { did: doc.did.clone(), frontier: doc.frontier() };
+        let msg = SyncMessage::Request {
+            did: doc.did.clone(),
+            frontier: doc.frontier(),
+        };
         let (outgoing, deliver) = state.handle(msg, &docs, &deny());
 
         assert!(outgoing.is_empty(), "peer up to date ⇒ no deltas");
@@ -728,7 +805,9 @@ mod tests {
         let signer = doc.verification_methods.entries()[0].id.clone();
         let mut d1 = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "c1".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "c1".to_owned(),
+            },
             ts(100),
             signer,
         );
@@ -737,14 +816,24 @@ mod tests {
         let docs = docs_for(&doc);
         let mut state = GossipState::new();
 
-        let msg = SyncMessage::Request { did: doc.did.clone(), frontier: stale };
+        let msg = SyncMessage::Request {
+            did: doc.did.clone(),
+            frontier: stale,
+        };
         let (outgoing, _) = state.handle(msg, &docs, &deny());
 
         assert_eq!(outgoing.len(), 1);
         match &outgoing[0] {
             SyncMessage::Deltas { deltas, .. } => {
-                assert_eq!(deltas.len(), 1, "peer lacks exactly the one post-genesis delta");
-                assert_eq!(deltas[0].content_hash().unwrap(), d1.content_hash().unwrap());
+                assert_eq!(
+                    deltas.len(),
+                    1,
+                    "peer lacks exactly the one post-genesis delta"
+                );
+                assert_eq!(
+                    deltas[0].content_hash().unwrap(),
+                    d1.content_hash().unwrap()
+                );
             }
             other => panic!("expected Deltas, got {:?}", other),
         }
@@ -758,7 +847,10 @@ mod tests {
         let delta = make_delta(&doc, 100);
         let mut state = GossipState::new();
 
-        let msg = SyncMessage::Deltas { did: doc.did.clone(), deltas: vec![delta] };
+        let msg = SyncMessage::Deltas {
+            did: doc.did.clone(),
+            deltas: vec![delta],
+        };
         let (outgoing, deliver) = state.handle(msg, &no_docs(), &deny());
 
         assert!(outgoing.is_empty());
@@ -779,7 +871,10 @@ mod tests {
 
     impl SimNode {
         fn new() -> Self {
-            Self { docs: HashMap::new(), state: GossipState::new() }
+            Self {
+                docs: HashMap::new(),
+                state: GossipState::new(),
+            }
         }
         fn track(&mut self, doc: Document) {
             self.docs.insert(doc.did.clone(), doc);
@@ -803,7 +898,14 @@ mod tests {
         for (i, n) in nodes.iter().enumerate() {
             for (did, doc) in &n.docs {
                 let hash = *doc.content_hash().unwrap().as_bytes();
-                queue.push_back((i, SyncMessage::Announce { did: did.clone(), hash, clock: ts(0) }));
+                queue.push_back((
+                    i,
+                    SyncMessage::Announce {
+                        did: did.clone(),
+                        hash,
+                        clock: ts(0),
+                    },
+                ));
             }
         }
         let mut budget = 100_000;
@@ -830,8 +932,14 @@ mod tests {
         let signer = doc.verification_methods.entries()[0].id.clone();
         let d = SignedDelta::new_with_parents(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: cred.to_owned() },
-            HlcTimestamp { wall_ms: wall, logical: 0, node_id: signer_node_id() },
+            DeltaOp::RevokeCredential {
+                credential_id: cred.to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: wall,
+                logical: 0,
+                node_id: signer_node_id(),
+            },
             doc.frontier(),
             signer,
             &signing_key(),
@@ -925,8 +1033,14 @@ mod tests {
         let key_id = a.verification_methods.entries()[0].id.clone();
         let forged = SignedDelta::new_with_parents(
             a.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "forged".to_owned() },
-            HlcTimestamp { wall_ms: 20, logical: 0, node_id: signer_node_id() },
+            DeltaOp::RevokeCredential {
+                credential_id: "forged".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: signer_node_id(),
+            },
             a.frontier(),
             key_id,
             &attacker,
@@ -938,7 +1052,14 @@ mod tests {
         deltas.push(forged);
         let b = make_doc(); // genesis only, same DID
         let mut docs = docs_for(&b);
-        let _ = merge_inbound(&mut docs, SyncMessage::Deltas { did: b.did.clone(), deltas }, &deny());
+        let _ = merge_inbound(
+            &mut docs,
+            SyncMessage::Deltas {
+                did: b.did.clone(),
+                deltas,
+            },
+            &deny(),
+        );
 
         // B applied genesis + the legit revocation and REJECTED the forgery, so it
         // is byte-identical to A (which never held the forged delta).
@@ -962,12 +1083,18 @@ mod tests {
 
         let outcome = merge_inbound(
             &mut docs,
-            SyncMessage::Deltas { did: doc.did.clone(), deltas },
+            SyncMessage::Deltas {
+                did: doc.did.clone(),
+                deltas,
+            },
             &deny(),
         );
 
         assert!(matches!(outcome, MergeOutcome::IgnoredUnsolicited));
-        assert!(docs.is_empty(), "unsolicited unknown DID must not be stored");
+        assert!(
+            docs.is_empty(),
+            "unsolicited unknown DID must not be stored"
+        );
     }
 
     /// A pending cold-start request (wanted set) admits the same batch.
@@ -981,12 +1108,18 @@ mod tests {
 
         let outcome = merge_inbound(
             &mut docs,
-            SyncMessage::Deltas { did: doc.did.clone(), deltas },
+            SyncMessage::Deltas {
+                did: doc.did.clone(),
+                deltas,
+            },
             &policy,
         );
 
         assert!(matches!(outcome, MergeOutcome::Bootstrapped(ref d) if d == &doc.did));
-        assert!(docs.contains_key(&doc.did), "wanted DID must be bootstrapped");
+        assert!(
+            docs.contains_key(&doc.did),
+            "wanted DID must be bootstrapped"
+        );
     }
 
     /// Replicate-all mode admits any DID announced on the mesh.
@@ -998,7 +1131,10 @@ mod tests {
 
         let outcome = merge_inbound(
             &mut docs,
-            SyncMessage::Deltas { did: doc.did.clone(), deltas },
+            SyncMessage::Deltas {
+                did: doc.did.clone(),
+                deltas,
+            },
             &BootstrapPolicy::replicate_all(),
         );
 

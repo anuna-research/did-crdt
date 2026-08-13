@@ -114,16 +114,18 @@ impl DeltaDag {
     /// (which causal cannot see, so the current-state floor must enforce it).
     #[must_use]
     pub fn has_revoking_delta(&self, key_id: &str) -> bool {
-        self.by_hash
-            .values()
-            .any(|d| matches!(&d.op, DeltaOp::RevokeVerificationMethod { key_id: k } if k == key_id))
+        self.by_hash.values().any(
+            |d| matches!(&d.op, DeltaOp::RevokeVerificationMethod { key_id: k } if k == key_id),
+        )
     }
 
     /// Whether the DAG holds a `Deactivate` delta. Distinguishes a deactivation
     /// backed by a delta (handled causally) from one imported via state-merge.
     #[must_use]
     pub fn has_deactivate_delta(&self) -> bool {
-        self.by_hash.values().any(|d| matches!(&d.op, DeltaOp::Deactivate))
+        self.by_hash
+            .values()
+            .any(|d| matches!(&d.op, DeltaOp::Deactivate))
     }
 
     /// Hashes referenced as a parent by some held delta but not held — i.e.
@@ -299,7 +301,11 @@ mod tests {
     fn delta(op: DeltaOp, parents: Vec<DeltaHash>, n: u64) -> SignedDelta {
         let d = did();
         let vm = format!("{}#key-0", d);
-        let ts = HlcTimestamp { wall_ms: n, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: n,
+            logical: 0,
+            node_id: 1,
+        };
         SignedDelta::new_with_parents(d, op, ts, parents, vm, &key()).unwrap()
     }
 
@@ -314,7 +320,9 @@ mod tests {
     }
 
     fn revoke_vm(id: &str) -> DeltaOp {
-        DeltaOp::RevokeVerificationMethod { key_id: id.to_owned() }
+        DeltaOp::RevokeVerificationMethod {
+            key_id: id.to_owned(),
+        }
     }
 
     // ── frontier ────────────────────────────────────────────────────────────
@@ -338,7 +346,13 @@ mod tests {
         // Insert child before parent; frontier must still converge to {child}.
         let g = delta(add_vm("k0"), vec![], 0);
         let gh = g.content_hash().unwrap();
-        let c = delta(DeltaOp::RevokeCredential { credential_id: "c".into() }, vec![gh.clone()], 1);
+        let c = delta(
+            DeltaOp::RevokeCredential {
+                credential_id: "c".into(),
+            },
+            vec![gh.clone()],
+            1,
+        );
         let ch = c.content_hash().unwrap();
 
         let mut dag = DeltaDag::new();
@@ -354,8 +368,20 @@ mod tests {
         let g = delta(add_vm("k0"), vec![], 0);
         let gh = dag.insert(g).unwrap();
         // Two concurrent children of the same parent: both are leaves.
-        let a = delta(DeltaOp::RevokeCredential { credential_id: "a".into() }, vec![gh.clone()], 1);
-        let b = delta(DeltaOp::RevokeCredential { credential_id: "b".into() }, vec![gh.clone()], 2);
+        let a = delta(
+            DeltaOp::RevokeCredential {
+                credential_id: "a".into(),
+            },
+            vec![gh.clone()],
+            1,
+        );
+        let b = delta(
+            DeltaOp::RevokeCredential {
+                credential_id: "b".into(),
+            },
+            vec![gh.clone()],
+            2,
+        );
         let ah = dag.insert(a).unwrap();
         let bh = dag.insert(b).unwrap();
         let mut f = dag.frontier();
@@ -386,8 +412,10 @@ mod tests {
         let dh = dag.insert(d).unwrap();
 
         // Is AddVM("k0") in the closure of the latest delta? Yes (it's the root).
-        let q = dag.closure_find(&[dh], |x| matches!(&x.op,
-            DeltaOp::AddVerificationMethod { id, .. } if id == "k0"));
+        let q = dag.closure_find(&[dh], |x| {
+            matches!(&x.op,
+            DeltaOp::AddVerificationMethod { id, .. } if id == "k0")
+        });
         assert_eq!(q, ClosureQuery::Found);
     }
 
@@ -398,8 +426,10 @@ mod tests {
         let gh = dag.insert(g).unwrap();
 
         // Is there a revocation of k0 in this complete closure? No.
-        let q = dag.closure_find(&[gh], |x| matches!(&x.op,
-            DeltaOp::RevokeVerificationMethod { key_id } if key_id == "k0"));
+        let q = dag.closure_find(&[gh], |x| {
+            matches!(&x.op,
+            DeltaOp::RevokeVerificationMethod { key_id } if key_id == "k0")
+        });
         assert_eq!(q, ClosureQuery::NotFound);
     }
 
@@ -421,8 +451,10 @@ mod tests {
         let gh = dag.insert(g).unwrap();
         let absent = DeltaHash("ffff".into());
 
-        let q = dag.closure_find(&[gh, absent], |x| matches!(&x.op,
-            DeltaOp::RevokeVerificationMethod { key_id } if key_id == "k0"));
+        let q = dag.closure_find(&[gh, absent], |x| {
+            matches!(&x.op,
+            DeltaOp::RevokeVerificationMethod { key_id } if key_id == "k0")
+        });
         assert_eq!(q, ClosureQuery::Found);
     }
 

@@ -58,6 +58,49 @@ pub struct DidDocumentMetadata {
     /// ISO 8601 timestamp of the most recent update to the DID document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<String>,
+
+    /// The public key from which this DID's identifier was derived.
+    ///
+    /// A method-specific property, carried in `didDocumentMetadata` because it
+    /// describes the DID rather than the resolution that produced it: it is
+    /// invariant across resolutions, resolvers, and time, which is precisely
+    /// what `didResolutionMetadata` is not for.
+    ///
+    /// It exists so a verifier can recompute the identifier for itself instead
+    /// of trusting the resolver — the derivation is a hash of this one input.
+    /// Once the genesis key is revoked it is filtered out of `verificationMethod`
+    /// (2P-Set), so without this property the document stops carrying the input
+    /// its own identifier is built from.
+    ///
+    /// Omitted when the resolver could not establish it. Per DID Resolution 1.0
+    /// metadata properties are optional, and absence means "not established" —
+    /// never "checked, and it failed".
+    #[serde(
+        rename = "genesisPublicKeyMultibase",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub genesis_public_key_multibase: Option<String>,
+
+    /// The signed deltas this document was materialised from, when the caller
+    /// asked for them with the `includeClosure` resolution option.
+    ///
+    /// A method-specific property. DID Resolution 1.0 §12.1 maps `Accept` to
+    /// "the caller's preferred representation of the DID document", and a
+    /// closure is NOT a representation of the document — it is the evidence the
+    /// document is derived from. So this is carried as a registered
+    /// method-specific metadata property rather than negotiated as a content
+    /// type, which keeps one canonical `GET /{did}` for every consumer.
+    ///
+    /// It exists because a projected document carries no signatures. A verifier
+    /// that deserialises `didDocument` has made the RESOLVER the authority on
+    /// the DID's own revocations. Replaying these deltas instead makes the
+    /// signatures the authority, which is the only reason a resolver operated by
+    /// someone else can be relied on at all.
+    ///
+    /// Off by default: it carries the entire history, and a caller that only
+    /// wants the document should not pay for it.
+    #[serde(rename = "signedClosure", skip_serializing_if = "Option::is_none")]
+    pub signed_closure: Option<crate::core::recon::ClosureBundle>,
 }
 
 // ── ResolutionResult ────────────────────────────────────────────────────────
@@ -83,6 +126,50 @@ pub struct ResolutionResult {
 
 // ── DidDocument ─────────────────────────────────────────────────────────────
 
+/// Top-level property names that DID Core defines, which `documentData` must
+/// never be allowed to emit.
+///
+/// `DidDocument::extra` is `#[serde(flatten)]`, so any key in it is written
+/// into the same JSON object as the typed fields. serde does not deduplicate
+/// across a flatten boundary: a `documentData` entry named `id` produces an
+/// object with TWO `id` members, and the meaning of that document is then
+/// whatever the consumer's parser decides. `serde_json` takes the last, so the
+/// injected value wins.
+///
+/// That is a document-integrity failure, not a cosmetic one. Shadowing
+/// `verificationMethod` replaces the authentication material a verifier sees
+/// while the CRDT's own key set is untouched — so the injected array survives
+/// revocation of the key that wrote it, because revocation acts on the 2P-Set
+/// and this value does not live there.
+///
+/// Both directions are closed, and BOTH are needed: `Document::merge` refuses a
+/// `SetDocumentData` naming one of these, and the projection skips them anyway,
+/// because state-based merge unions `DocumentData` wholesale without passing
+/// through delta admission. A peer running older code, or a hostile one, can
+/// still put a reserved key into state.
+pub const RESERVED_DOCUMENT_PROPERTIES: &[&str] = &[
+    "@context",
+    "id",
+    "alsoKnownAs",
+    "controller",
+    "verificationMethod",
+    "authentication",
+    "assertionMethod",
+    "keyAgreement",
+    "capabilityInvocation",
+    "capabilityDelegation",
+    "service",
+];
+
+/// Whether `key` is a DID Core property that `documentData` may not set.
+///
+/// Compared case-sensitively, matching DID Core, which defines these names
+/// exactly. A near-miss like `Id` is not reserved and does not collide, because
+/// JSON member names are case-sensitive too.
+pub fn is_reserved_document_property(key: &str) -> bool {
+    RESERVED_DOCUMENT_PROPERTIES.contains(&key)
+}
+
 /// A W3C DID Core JSON-LD document.
 ///
 /// Field names use the camelCase convention mandated by DID Core.
@@ -93,22 +180,51 @@ pub struct DidDocument {
 
     pub id: String,
 
-    #[serde(rename = "verificationMethod", default, skip_serializing_if = "Vec::is_empty")]
+    /// Other identifiers the controller asserts refer to the same subject.
+    ///
+    /// A typed field rather than a `documentData` passthrough. It is a DID Core
+    /// property, so an untyped entry of this name would emit a duplicate member
+    /// and let the meaning of the document be settled by the consumer's parser
+    /// — see [`RESERVED_DOCUMENT_PROPERTIES`] and BUG-001.
+    #[serde(rename = "alsoKnownAs", default, skip_serializing_if = "Vec::is_empty")]
+    pub also_known_as: Vec<String>,
+
+    #[serde(
+        rename = "verificationMethod",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub verification_method: Vec<VerificationMethod>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authentication: Vec<Value>,
 
-    #[serde(rename = "assertionMethod", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "assertionMethod",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub assertion_method: Vec<Value>,
 
-    #[serde(rename = "keyAgreement", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "keyAgreement",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub key_agreement: Vec<Value>,
 
-    #[serde(rename = "capabilityInvocation", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "capabilityInvocation",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub capability_invocation: Vec<Value>,
 
-    #[serde(rename = "capabilityDelegation", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "capabilityDelegation",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub capability_delegation: Vec<Value>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -133,6 +249,7 @@ impl DidDocument {
         Self {
             context: Self::base_context(),
             id: did.to_string(),
+            also_known_as: Vec::new(),
             verification_method: Vec::new(),
             authentication: Vec::new(),
             assertion_method: Vec::new(),
@@ -243,7 +360,10 @@ mod tests {
     #[test]
     fn base_context_first_is_did_v1() {
         let ctx = DidDocument::base_context();
-        assert_eq!(ctx[0], Value::String("https://www.w3.org/ns/did/v1".to_owned()));
+        assert_eq!(
+            ctx[0],
+            Value::String("https://www.w3.org/ns/did/v1".to_owned())
+        );
     }
 
     #[test]
@@ -289,8 +409,14 @@ mod tests {
     fn serialises_context_as_at_context() {
         let doc = DidDocument::empty(&test_did());
         let json = serde_json::to_value(&doc).unwrap();
-        assert!(json.get("@context").is_some(), "@context key must be present");
-        assert!(json.get("context").is_none(), "bare 'context' key must not appear");
+        assert!(
+            json.get("@context").is_some(),
+            "@context key must be present"
+        );
+        assert!(
+            json.get("context").is_none(),
+            "bare 'context' key must not appear"
+        );
     }
 
     #[test]
@@ -358,6 +484,8 @@ mod tests {
                 version_id: "abc".to_owned(),
                 created: None,
                 updated: None,
+                genesis_public_key_multibase: None,
+                signed_closure: None,
             },
         };
         let json = serde_json::to_value(&result).unwrap();
@@ -369,8 +497,14 @@ mod tests {
     fn metadata_created_updated_omitted_when_none() {
         let meta = DidDocumentMetadata::default();
         let json = serde_json::to_value(&meta).unwrap();
-        assert!(json.get("created").is_none(), "created should be omitted when None");
-        assert!(json.get("updated").is_none(), "updated should be omitted when None");
+        assert!(
+            json.get("created").is_none(),
+            "created should be omitted when None"
+        );
+        assert!(
+            json.get("updated").is_none(),
+            "updated should be omitted when None"
+        );
     }
 
     #[test]
@@ -380,10 +514,33 @@ mod tests {
             version_id: "v1".to_owned(),
             created: Some("2026-01-01T00:00:00.000Z".to_owned()),
             updated: Some("2026-03-10T12:00:00.000Z".to_owned()),
+            genesis_public_key_multibase: None,
+            signed_closure: None,
         };
         let json = serde_json::to_value(&meta).unwrap();
         assert_eq!(json["created"], json!("2026-01-01T00:00:00.000Z"));
         assert_eq!(json["updated"], json!("2026-03-10T12:00:00.000Z"));
+    }
+
+    #[test]
+    fn metadata_genesis_key_wire_spelling_and_omission() {
+        // The rename is what a verifier reads. A Rust-side rename that silently
+        // changed the JSON key would break every consumer while every test that
+        // only touches the struct stayed green.
+        let meta = DidDocumentMetadata {
+            genesis_public_key_multibase: Some("zEd25519TestKey".to_owned()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(
+            json.get("genesisPublicKeyMultibase"),
+            Some(&json!("zEd25519TestKey"))
+        );
+
+        // Absent, not null: `None` must not serialise as an explicit JSON null,
+        // which a consumer could read as an established negative result.
+        let json = serde_json::to_value(&DidDocumentMetadata::default()).unwrap();
+        assert!(json.get("genesisPublicKeyMultibase").is_none());
     }
 
     #[test]
@@ -465,7 +622,8 @@ mod tests {
             public_key_multibase: Some("zTestKey".to_owned()),
             public_key_jwk: None,
         });
-        doc.authentication.push(Value::String(format!("{}#key-0", did)));
+        doc.authentication
+            .push(Value::String(format!("{}#key-0", did)));
 
         let json = serde_json::to_string(&doc).unwrap();
         let recovered: DidDocument = serde_json::from_str(&json).unwrap();
@@ -486,6 +644,8 @@ mod tests {
                 version_id: "deadbeef".to_owned(),
                 created: Some("2026-01-01T00:00:00.000Z".to_owned()),
                 updated: None,
+                genesis_public_key_multibase: None,
+                signed_closure: None,
             },
         };
         let json = serde_json::to_string(&result).unwrap();

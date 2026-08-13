@@ -11,10 +11,10 @@ pub mod causal;
 pub mod crdt;
 pub mod dag;
 pub mod delta;
-pub mod recon;
 pub mod did;
 pub mod document;
 pub mod hlc;
+pub mod recon;
 pub mod resolve;
 pub mod validate;
 
@@ -43,7 +43,9 @@ pub enum Error {
     /// REQ-363; the Reject/retransmit policy of SPEC-035 OQ-1). This is a
     /// non-fatal, retryable refusal, distinct from [`Error::DeltaRejected`].
     #[error("delta pending: {} causal predecessor(s) not yet available", .missing.len())]
-    DeltaPending { missing: Vec<crate::core::delta::DeltaHash> },
+    DeltaPending {
+        missing: Vec<crate::core::delta::DeltaHash>,
+    },
 
     #[error("delta too large: {size} bytes exceeds maximum {max} bytes")]
     DeltaTooLarge { size: usize, max: usize },

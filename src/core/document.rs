@@ -14,24 +14,24 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::crdt::{
-    ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods,
-    ServiceEndpoints, ServiceEntry, VerificationMethodEntry, VerificationMethods,
-};
 use crate::core::admission::{AdmissionResult, RejectReason};
 use crate::core::causal::verify_causal;
+use crate::core::crdt::{
+    ActiveKey, AlsoKnownAs, Deactivated, DocumentData, Revocations, RevokedVerificationMethods,
+    ServiceEndpoints, ServiceEntry, VerificationMethodEntry, VerificationMethods,
+};
 use crate::core::dag::DeltaDag;
+use crate::core::delta::ms_to_iso8601;
 use crate::core::delta::{
     DeltaHash, DeltaOp, SignedDelta, SuiteType, VerificationRelationship, MAX_DELTA_SIZE,
 };
 use crate::core::did::Did;
 use crate::core::hlc::HlcTimestamp;
-use crate::core::delta::ms_to_iso8601;
+use crate::core::recon::ClosureBundle;
 use crate::core::resolve::{
     DidDocument, DidDocumentMetadata, DidResolutionMetadata, ResolutionResult, ServiceEndpoint,
     VerificationMethod,
 };
-use crate::core::recon::ClosureBundle;
 use crate::core::{Error, Result};
 use std::collections::{HashMap, HashSet};
 
@@ -53,6 +53,9 @@ pub struct Document {
 
     /// LWW-Map of arbitrary document metadata.
     pub(crate) document_data: DocumentData,
+
+    /// LWW-Register holding the whole `alsoKnownAs` URI set.
+    pub(crate) also_known_as: AlsoKnownAs,
 
     /// Max-Register holding the currently-active key reference.
     pub(crate) active_key: ActiveKey,
@@ -112,6 +115,10 @@ struct DocumentRepr {
     verification_methods: VerificationMethods,
     service_endpoints: ServiceEndpoints,
     document_data: DocumentData,
+    // Defaulted: state serialised before `alsoKnownAs` existed must still load,
+    // and an absent set is exactly an empty one.
+    #[serde(default)]
+    also_known_as: AlsoKnownAs,
     active_key: ActiveKey,
     revocations: Revocations,
     revoked_verification_methods: RevokedVerificationMethods,
@@ -147,6 +154,7 @@ impl TryFrom<DocumentRepr> for Document {
             verification_methods: r.verification_methods,
             service_endpoints: r.service_endpoints,
             document_data: r.document_data,
+            also_known_as: r.also_known_as,
             active_key: r.active_key,
             revocations: r.revocations,
             revoked_verification_methods: r.revoked_verification_methods,
@@ -188,8 +196,11 @@ fn topo_order_bundle(by_hash: &HashMap<DeltaHash, SignedDelta>) -> Result<Vec<De
     }
     // Kahn's algorithm. Roots are drained in sorted order for a deterministic,
     // reproducible result (correctness only needs parents-before-children).
-    let mut ready: Vec<DeltaHash> =
-        indeg.iter().filter(|(_, &n)| n == 0).map(|(h, _)| h.clone()).collect();
+    let mut ready: Vec<DeltaHash> = indeg
+        .iter()
+        .filter(|(_, &n)| n == 0)
+        .map(|(h, _)| h.clone())
+        .collect();
     ready.sort();
     let mut order: Vec<DeltaHash> = Vec::with_capacity(by_hash.len());
     while let Some(h) = ready.pop() {
@@ -208,9 +219,41 @@ fn topo_order_bundle(by_hash: &HashMap<DeltaHash, SignedDelta>) -> Result<Vec<De
         order.push(h);
     }
     if order.len() != by_hash.len() {
-        return Err(Error::DeltaRejected("bundle has a parent cycle: tampered".to_owned()));
+        return Err(Error::DeltaRejected(
+            "bundle has a parent cycle: tampered".to_owned(),
+        ));
     }
     Ok(order)
+}
+
+/// Derive the `did:crdt:<hash>` identifier from the genesis public key.
+///
+/// The identifier is a pure function of that ONE input: the timestamp is the
+/// all-zero default and the proto-op is built from the key, so nothing else
+/// varies. That is what lets a verifier holding the key recompute the DID for
+/// itself rather than taking a resolver's word for it — see
+/// [`Document::genesis_public_key_multibase`].
+///
+/// Creation and recomputation share this function deliberately. Two copies
+/// that drifted would produce a document whose own identifier no longer
+/// verifies against its genesis key, and nothing else in the system checks
+/// that relation — so the drift would surface as an unexplained verification
+/// failure at a consumer, arbitrarily far from the change that caused it.
+fn derive_did(public_key_multibase: &str) -> Result<Did> {
+    let timestamp = HlcTimestamp::default();
+
+    // A placeholder fragment, because the real key id embeds the DID, which
+    // does not exist until this hash has been taken.
+    let proto_op = DeltaOp::AddVerificationMethod {
+        id: "#key-0".to_owned(),
+        public_key_multibase: public_key_multibase.to_owned(),
+        suite_type: SuiteType::default(),
+        relationships: crate::core::delta::default_relationships(),
+    };
+    let signer_key = public_key_multibase.to_owned();
+
+    let seed_bytes = serde_json::to_vec(&(&timestamp, &proto_op, &signer_key))?;
+    Ok(Did::from_creation_hash(&blake3::hash(&seed_bytes)))
 }
 
 impl Document {
@@ -236,11 +279,22 @@ impl Document {
         self.revocations.entries()
     }
 
+    /// The current `alsoKnownAs` alias set, sorted and deduplicated.
+    ///
+    /// Offered alongside [`Self::resolve`] rather than only inside it, for the
+    /// same reason as [`Self::verification_methods`]: a consumer checking a
+    /// reciprocal binding needs the aliases as data, not as a rendered
+    /// document, and `resolve` yields nothing at all for a deactivated DID —
+    /// which is precisely a case where knowing what a DID claimed still matters.
+    pub fn also_known_as(&self) -> Vec<String> {
+        self.also_known_as.entries().to_vec()
+    }
+
     // ── construction ─────────────────────────────────────────────────────────
 
     /// Create a new DID document from a public key in Multibase encoding.
     ///
-    /// Derives the `did:crdt:<hash>` identifier by:
+    /// Derives the `did:crdt:<hash>` identifier by (see [`derive_did`]):
     /// 1. Building a genesis `AddVerificationMethod` delta (using a stable
     ///    `#key-0` fragment with a temporary placeholder DID).
     /// 2. Hashing `(timestamp, op, signer_key)` with BLAKE3.
@@ -254,20 +308,8 @@ impl Document {
         // Genesis timestamp — all-zero so every subsequent delta is causally
         // later and the creation event is reproducible across replicas.
         let timestamp = HlcTimestamp::default();
-
-        // Build a pre-DID op with a placeholder fragment to hash for the DID.
-        let proto_op = DeltaOp::AddVerificationMethod {
-            id: "#key-0".to_owned(),
-            public_key_multibase: public_key_multibase.to_owned(),
-            suite_type: SuiteType::default(),
-            relationships: crate::core::delta::default_relationships(),
-        };
         let signer_key = public_key_multibase.to_owned();
-
-        // Hash (timestamp, proto_op, signer_key) to derive the DID.
-        let seed_bytes = serde_json::to_vec(&(&timestamp, &proto_op, &signer_key))?;
-        let creation_hash = blake3::hash(&seed_bytes);
-        let did = Did::from_creation_hash(&creation_hash);
+        let did = derive_did(public_key_multibase)?;
 
         // Now that we know the DID, build the real key id.
         let key_id = format!("{}#key-0", did);
@@ -283,6 +325,7 @@ impl Document {
             verification_methods: VerificationMethods::new(),
             service_endpoints: ServiceEndpoints::new(),
             document_data: DocumentData::new(),
+            also_known_as: AlsoKnownAs::new(),
             active_key: ActiveKey::new(),
             revocations: Revocations::new(),
             revoked_verification_methods: RevokedVerificationMethods::new(),
@@ -329,7 +372,10 @@ impl Document {
         // 0. Size gate — reject oversized deltas before any processing (ADR-004).
         let serialised_size = serde_json::to_vec(&delta)?.len();
         if serialised_size > MAX_DELTA_SIZE {
-            return Err(Error::DeltaTooLarge { size: serialised_size, max: MAX_DELTA_SIZE });
+            return Err(Error::DeltaTooLarge {
+                size: serialised_size,
+                max: MAX_DELTA_SIZE,
+            });
         }
 
         // 1. DID match.
@@ -338,6 +384,29 @@ impl Document {
                 "delta DID {} does not match document DID {}",
                 delta.did, self.did
             )));
+        }
+
+        // 1a. Reserved-name gate — `documentData` may not carry a DID Core
+        //     property. Such a key projects into the same JSON object as the
+        //     typed fields and shadows it for any last-wins parser, which lets
+        //     it replace `verificationMethod` or restate `id`. Refused here so
+        //     the delta never enters the log; see
+        //     `resolve::RESERVED_DOCUMENT_PROPERTIES` for why the projection
+        //     ALSO filters.
+        // 1a-bis. Recognise the alsoKnownAs set in full before any of it is
+        //     applied. These strings are republished by verifiers into
+        //     documents consumed by software this project does not control, so
+        //     they are recognised at the boundary rather than sanitised later.
+        if let DeltaOp::SetAlsoKnownAs { uris } = &delta.op {
+            crate::core::validate::recognise_also_known_as(uris)?;
+        }
+
+        if let DeltaOp::SetDocumentData { key, .. } = &delta.op {
+            if crate::core::resolve::is_reserved_document_property(key) {
+                return Err(Error::DeltaRejected(format!(
+                    "documentData key {key:?} is a reserved DID Core property"
+                )));
+            }
         }
 
         // 1b. Idempotent dedup: if this exact delta is already held, re-applying
@@ -412,7 +481,8 @@ impl Document {
         }
         // A revocation present only in current state (no `RevokeVerificationMethod`
         // delta) is a state-import fact the causal check could not see.
-        if self.revoked_verification_methods.contains(&signer) && !self.dag.has_revoking_delta(&signer)
+        if self.revoked_verification_methods.contains(&signer)
+            && !self.dag.has_revoking_delta(&signer)
         {
             return Err(Error::Unauthorised(format!(
                 "signer key {signer} has been revoked (state-imported)"
@@ -517,9 +587,11 @@ impl Document {
         self.verification_methods.merge(other.verification_methods);
         self.service_endpoints.merge(other.service_endpoints);
         self.document_data.merge(other.document_data);
+        self.also_known_as.merge(other.also_known_as);
         self.active_key.merge(other.active_key);
         self.revocations.merge(other.revocations);
-        self.revoked_verification_methods.merge(other.revoked_verification_methods);
+        self.revoked_verification_methods
+            .merge(other.revoked_verification_methods);
         self.deactivated.merge(other.deactivated);
 
         // Merge timestamps: take the earliest created and latest updated.
@@ -540,8 +612,11 @@ impl Document {
         // (or rejected as back-parented by a full-history peer) even though the
         // state visibly converged. Dedup by content hash; DAG insertion is
         // order-independent (REQ-360), so the frontier converges to the union.
-        let mut seen: HashSet<DeltaHash> =
-            self.delta_log.iter().filter_map(|d| d.content_hash().ok()).collect();
+        let mut seen: HashSet<DeltaHash> = self
+            .delta_log
+            .iter()
+            .filter_map(|d| d.content_hash().ok())
+            .collect();
         for d in other.delta_log {
             let Ok(h) = d.content_hash() else { continue };
             if seen.insert(h) {
@@ -673,30 +748,30 @@ impl Document {
         Ok(applied)
     }
 
-/// Render a multibase Ed25519 public key as an RFC 8037 OKP JWK.
-///
-/// Returns `None` for anything this cannot render faithfully — an unexpected
-/// multibase prefix, or a key that is not 32 octets. A twin is omitted rather
-/// than guessed at: a `JsonWebKey` carrying the wrong bytes would verify
-/// signatures made by a key nobody authorised, which is worse than a document
-/// with no twin in it.
-///
-/// `d` is never present. A projection reads public state and has no private
-/// component to leak, and `CON-206` step 6 in the adopting profile refuses a
-/// JWK that carries one.
-fn jwk_from_multibase(multibase: &str) -> Option<Value> {
-    use base64ct::{Base64UrlUnpadded, Encoding as _};
+    /// Render a multibase Ed25519 public key as an RFC 8037 OKP JWK.
+    ///
+    /// Returns `None` for anything this cannot render faithfully — an unexpected
+    /// multibase prefix, or a key that is not 32 octets. A twin is omitted rather
+    /// than guessed at: a `JsonWebKey` carrying the wrong bytes would verify
+    /// signatures made by a key nobody authorised, which is worse than a document
+    /// with no twin in it.
+    ///
+    /// `d` is never present. A projection reads public state and has no private
+    /// component to leak, and `CON-206` step 6 in the adopting profile refuses a
+    /// JWK that carries one.
+    fn jwk_from_multibase(multibase: &str) -> Option<Value> {
+        use base64ct::{Base64UrlUnpadded, Encoding as _};
 
-    let raw = Base64UrlUnpadded::decode_vec(multibase.strip_prefix('u')?).ok()?;
-    if raw.len() != 32 {
-        return None;
+        let raw = Base64UrlUnpadded::decode_vec(multibase.strip_prefix('u')?).ok()?;
+        if raw.len() != 32 {
+            return None;
+        }
+        Some(serde_json::json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": Base64UrlUnpadded::encode_string(&raw),
+        }))
     }
-    Some(serde_json::json!({
-        "kty": "OKP",
-        "crv": "Ed25519",
-        "x": Base64UrlUnpadded::encode_string(&raw),
-    }))
-}
 
     // ── projection ───────────────────────────────────────────────────────────
 
@@ -707,6 +782,83 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
     /// `didDocument` field is `None` per DID Core 1.1 §7.1.
     ///
     /// This operation is pure and read-only — it never mutates CRDT state.
+    /// The public key this DID was derived from, when it can be established.
+    ///
+    /// Published so a verifier can recompute the identifier ITSELF. Two facts
+    /// make that worth carrying:
+    ///
+    /// - [`Self::resolve`] filters revoked keys out of the DID document
+    ///   (2P-Set: authorized = added \ revoked). Once the genesis key is
+    ///   rotated, the served document no longer contains the input its own
+    ///   identifier derives from — the relation stops being checkable exactly
+    ///   when the document stops being self-describing. The 2P-Set still holds
+    ///   the entry, so the node can answer even though its document cannot.
+    /// - The answer cannot be faked. Deriving the DID is a BLAKE3 hash, so
+    ///   preimage resistance means no node can invent a genesis key for a DID
+    ///   it was asked about. A verifier that recomputes needs to trust nothing
+    ///   — which is what separates this from a self-reported boolean, where a
+    ///   dishonest node and an honest one emit the same byte.
+    ///
+    /// The `#key-0` naming convention is deliberately NOT consulted. The
+    /// backing set is a G-Set of whole entries rather than a map keyed on `id`,
+    /// so several entries may carry the same `id` with different keys — picking
+    /// by name would pick by sort order, and a second `#key-0` entry would be
+    /// enough to shadow the genuine one. The hash decides instead, and preimage
+    /// resistance means at most one entry can satisfy it.
+    ///
+    /// Returns `None` when no key held derives this DID. Absent means "could
+    /// not establish", and must never be read as "established, and it failed".
+    pub fn genesis_public_key_multibase(&self) -> Option<String> {
+        self.verification_methods
+            .entries()
+            .into_iter()
+            .find(|e| derive_did(&e.public_key_multibase).is_ok_and(|d| d == self.did))
+            .map(|e| e.public_key_multibase)
+    }
+
+    /// The signed deltas this replica holds, as a causal-closure bundle.
+    ///
+    /// This is what a verifier that will not take a resolver's word for the
+    /// document needs: a projected document carries no signatures, so
+    /// deserialising one makes the RESOLVER authoritative on the DID's own
+    /// revocations. Replaying these makes the signatures authoritative instead.
+    ///
+    /// EVERY frontier head's closure is included, not just the target's. With
+    /// concurrent heads, one head's ancestry omits the other branch, and a
+    /// verifier replaying it would materialise a document missing whatever only
+    /// the other branch carries — a revocation, for instance. Serving less than
+    /// the full history is how a resolver silently answers an old question.
+    ///
+    /// `target` names one head deterministically (the greatest hash), so the
+    /// answer is stable across replicas holding the same state. It is the head
+    /// the bundle was extracted at, not a claim that it is the only one.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the local closure is incomplete — an ancestor is referenced but
+    /// not held. Refusing beats serving a bundle a verifier would reject for
+    /// dangling parents after paying to transfer it.
+    pub fn closure_bundle(&self) -> Result<ClosureBundle> {
+        let mut heads = self.dag.frontier();
+        heads.sort();
+        let Some(target) = heads.last().cloned() else {
+            return Err(Error::DeltaRejected(
+                "no delta history from which to extract a closure".to_owned(),
+            ));
+        };
+
+        let mut deltas: Vec<SignedDelta> = Vec::new();
+        let mut seen: HashSet<DeltaHash> = HashSet::new();
+        for head in &heads {
+            for delta in self.dag.extract_closure(head, &[])?.deltas {
+                if seen.insert(delta.content_hash()?) {
+                    deltas.push(delta);
+                }
+            }
+        }
+        Ok(ClosureBundle { target, deltas })
+    }
+
     pub fn resolve(&self) -> Result<ResolutionResult> {
         let is_deactivated = self.deactivated.is_set();
 
@@ -762,7 +914,9 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
                 .verification_method
                 .iter()
                 .filter(|m| {
-                    doc.assertion_method.iter().any(|r| r.as_str() == Some(m.id.as_str()))
+                    doc.assertion_method
+                        .iter()
+                        .any(|r| r.as_str() == Some(m.id.as_str()))
                 })
                 .collect();
             // Ordered by id so the numbering is a function of state rather than
@@ -775,7 +929,11 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
                 .filter_map(|(index, method)| {
                     let jwk = Self::jwk_from_multibase(method.public_key_multibase.as_deref()?)?;
                     Some(VerificationMethod {
-                        id: format!("{}{}{index}", self.did, crate::core::resolve::JWK_FRAGMENT_PREFIX),
+                        id: format!(
+                            "{}{}{index}",
+                            self.did,
+                            crate::core::resolve::JWK_FRAGMENT_PREFIX
+                        ),
                         r#type: crate::core::resolve::JSON_WEB_KEY_TYPE.to_owned(),
                         controller: self.did.to_string(),
                         public_key_multibase: None,
@@ -798,8 +956,22 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
                 });
             }
 
-            // Map LWW document data into the extra flat map.
+            doc.also_known_as = self.also_known_as.entries().to_vec();
+
+            // Map LWW document data into the extra flat map, refusing anything
+            // that would collide with a DID Core property.
+            //
+            // `extra` is flattened into the same JSON object as the typed
+            // fields, and serde does not deduplicate across that boundary — a
+            // key of `id` here emits a second `id` member and the consumer's
+            // parser decides which one counts. Filtering at projection rather
+            // than only at admission is deliberate: state-based merge unions
+            // `document_data` wholesale, so a reserved key can enter state
+            // without ever passing `merge`'s check.
             for (key, value) in self.document_data.iter() {
+                if crate::core::resolve::is_reserved_document_property(key) {
+                    continue;
+                }
                 doc.extra.insert(key.to_owned(), value.clone());
             }
 
@@ -820,6 +992,7 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
                 &vm_entries,
                 &svc_entries,
                 &data_entries,
+                self.also_known_as.entries(),
                 self.revocations.entries(),
                 self.revoked_verification_methods.entries(),
                 self.active_key.current(),
@@ -835,6 +1008,16 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
             version_id,
             created: self.created_ms.map(ms_to_iso8601),
             updated: self.updated_ms.map(ms_to_iso8601),
+            // Emitted even when the document is deactivated: the identifier is
+            // still derived from this key, and a verifier checking a tombstone
+            // has the same reason to want the relation as one checking a live
+            // document.
+            genesis_public_key_multibase: self.genesis_public_key_multibase(),
+            // Off unless the caller asked for it with the `includeClosure`
+            // resolution option; the handler stamps it. Extracting the whole
+            // history on every resolution would make callers who only want the
+            // document pay for evidence they never read.
+            signed_closure: None,
         };
 
         Ok(ResolutionResult {
@@ -979,7 +1162,12 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
     // ── private helpers ──────────────────────────────────────────────────────
 
     /// Apply a single [`DeltaOp`] to the appropriate CRDT field.
-    fn apply_op(&mut self, op: &DeltaOp, timestamp: HlcTimestamp, parents: &[DeltaHash]) -> Result<()> {
+    fn apply_op(
+        &mut self,
+        op: &DeltaOp,
+        timestamp: HlcTimestamp,
+        parents: &[DeltaHash],
+    ) -> Result<()> {
         // Track the most recent wall-clock timestamp.
         let wall = timestamp.wall_ms;
         match self.updated_ms {
@@ -989,11 +1177,24 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
         }
 
         match op {
-            DeltaOp::AddVerificationMethod { id, public_key_multibase, suite_type, relationships } => {
-                self.verification_methods
-                    .insert(id.clone(), public_key_multibase.clone(), suite_type.clone(), relationships.clone());
+            DeltaOp::AddVerificationMethod {
+                id,
+                public_key_multibase,
+                suite_type,
+                relationships,
+            } => {
+                self.verification_methods.insert(
+                    id.clone(),
+                    public_key_multibase.clone(),
+                    suite_type.clone(),
+                    relationships.clone(),
+                );
             }
-            DeltaOp::AddServiceEndpoint { id, service_type, endpoint } => {
+            DeltaOp::AddServiceEndpoint {
+                id,
+                service_type,
+                endpoint,
+            } => {
                 // The add's dot is this delta's own HLC timestamp — stable on
                 // every replica because it travels in the signed delta.
                 self.service_endpoints.apply_add(
@@ -1012,16 +1213,21 @@ fn jwk_from_multibase(multibase: &str) -> Option<Value> {
                 // add lies outside ↓R and is therefore never cancelled (add
                 // wins). At apply time the remove is not yet in the DAG, so ↓R is
                 // the closure of its parents.
-                let observed: Vec<HlcTimestamp> = self.dag.closure_collect(parents, |d| match &d.op {
-                    DeltaOp::AddServiceEndpoint { id: added_id, .. } if added_id == id => {
-                        Some(d.timestamp)
-                    }
-                    _ => None,
-                });
+                let observed: Vec<HlcTimestamp> =
+                    self.dag.closure_collect(parents, |d| match &d.op {
+                        DeltaOp::AddServiceEndpoint { id: added_id, .. } if added_id == id => {
+                            Some(d.timestamp)
+                        }
+                        _ => None,
+                    });
                 self.service_endpoints.apply_remove(&observed, timestamp);
             }
+            DeltaOp::SetAlsoKnownAs { uris } => {
+                self.also_known_as.set(uris.clone(), timestamp);
+            }
             DeltaOp::SetDocumentData { key, value } => {
-                self.document_data.set(key.clone(), value.clone(), timestamp);
+                self.document_data
+                    .set(key.clone(), value.clone(), timestamp);
             }
             DeltaOp::RotateKey { seq, key_ref } => {
                 self.active_key.rotate(*seq, key_ref.clone());
@@ -1083,10 +1289,55 @@ mod tests {
         assert_ne!(a.did, b.did);
     }
 
+    #[test]
+    fn did_derivation_is_pinned_to_known_vectors() {
+        // The derivation is the most consequential constant in the method: if
+        // it changes, every DID already issued becomes unresolvable, and every
+        // signature chained to one stops verifying. Nothing else in the suite
+        // pins it — the other tests assert relations between DIDs (distinct
+        // keys differ, round-trips agree), all of which hold just as well
+        // AFTER a change to the hash input. So a refactor could silently
+        // reissue every identifier in the world and the suite would stay green.
+        //
+        // These vectors were captured from the implementation as it stood at
+        // c59fd24, before `derive_did` was extracted, and confirmed identical
+        // after. Changing them is not a test fix — it is a breaking change to
+        // the method, and needs a migration story before the numbers move.
+        for (key, expected) in [
+            (
+                "zEd25519TestKey",
+                "did:crdt:a9baa8e5775077f7c22e671167a641bab4498c7e06e7dd7d92c43b83656504db",
+            ),
+            (
+                "zAnotherKey",
+                "did:crdt:bb2800f268648cc3abe559bcab94edcedcfa68ef7d462304e9920316c4c81f6b",
+            ),
+            // The empty key is not a valid input, but it is a valid probe of
+            // the encoding: it pins the framing around a zero-length field.
+            (
+                "",
+                "did:crdt:cc650842519c330619c244a36d0530dab5eee84bd785a00c7b989121ba2f6d06",
+            ),
+        ] {
+            assert_eq!(
+                Document::new(key).unwrap().0.did.as_str(),
+                expected,
+                "DID derivation changed for {key:?} — see the note above before touching this"
+            );
+            // The standalone entry point must agree with creation, or a
+            // verifier recomputing would disagree with the issuer.
+            assert_eq!(derive_did(key).unwrap().as_str(), expected);
+        }
+    }
+
     // ── merge() ───────────────────────────────────────────────────────────────
 
     fn signed_delta(doc: &Document, op: DeltaOp, signer: &str) -> SignedDelta {
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        };
         // Commit to the current frontier so the delta is causally grounded
         // (SPEC-036). Unsigned deltas are not signature-checked by merge, so we
         // set `parents` directly. Re-stamp with a fresh frontier each call.
@@ -1097,12 +1348,7 @@ mod tests {
 
     /// Build a frontier-grounded unsigned delta with an explicit timestamp and
     /// merge it. The DAG-era replacement for `doc.merge(SignedDelta::unsigned(..))`.
-    fn merge_op(
-        doc: &mut Document,
-        op: DeltaOp,
-        ts: HlcTimestamp,
-        signer: &str,
-    ) -> Result<()> {
+    fn merge_op(doc: &mut Document, op: DeltaOp, ts: HlcTimestamp, signer: &str) -> Result<()> {
         let mut d = SignedDelta::unsigned(doc.did.clone(), op, ts, signer.to_owned());
         d.parents = doc.frontier();
         doc.merge(d)
@@ -1122,7 +1368,9 @@ mod tests {
             &signer,
         );
         doc.merge(delta).expect("merge must succeed");
-        assert!(doc.service_endpoints.contains_id(&format!("{}#svc-1", doc.did)));
+        assert!(doc
+            .service_endpoints
+            .contains_id(&format!("{}#svc-1", doc.did)));
     }
 
     #[test]
@@ -1139,10 +1387,16 @@ mod tests {
         // advances the frontier: the child replaces its parent.
         let signer = doc.verification_methods.entries()[0].id.clone();
         let key = SigningKey::Ed25519(DalekKey::from_bytes(&[9u8; 32]));
-        let ts = HlcTimestamp { wall_ms: 2_000, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 2_000,
+            logical: 0,
+            node_id: 1,
+        };
         let delta = SignedDelta::new_with_parents(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "c1".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "c1".to_owned(),
+            },
             ts,
             doc.frontier(),
             signer,
@@ -1152,7 +1406,11 @@ mod tests {
         let dh = delta.content_hash().unwrap();
         doc.merge(delta).expect("merge must succeed");
 
-        assert_eq!(doc.frontier(), vec![dh], "child must replace genesis at the frontier");
+        assert_eq!(
+            doc.frontier(),
+            vec![dh],
+            "child must replace genesis at the frontier"
+        );
     }
 
     #[test]
@@ -1161,11 +1419,26 @@ mod tests {
         // it can admit correctly-parented updates (SPEC-036).
         let (mut doc, _) = make_doc();
         let signer = doc.verification_methods.entries()[0].id.clone();
-        let ts = HlcTimestamp { wall_ms: 5, logical: 0, node_id: 1 };
-        merge_op(&mut doc, DeltaOp::RevokeCredential { credential_id: "c1".to_owned() }, ts, &signer)
-            .unwrap();
+        let ts = HlcTimestamp {
+            wall_ms: 5,
+            logical: 0,
+            node_id: 1,
+        };
+        merge_op(
+            &mut doc,
+            DeltaOp::RevokeCredential {
+                credential_id: "c1".to_owned(),
+            },
+            ts,
+            &signer,
+        )
+        .unwrap();
         let frontier_before = doc.frontier();
-        assert_eq!(frontier_before.len(), 1, "non-trivial frontier after a mutation");
+        assert_eq!(
+            frontier_before.len(),
+            1,
+            "non-trivial frontier after a mutation"
+        );
 
         // Round-trip through to_bytes/from_bytes.
         let bytes = doc.to_bytes().unwrap();
@@ -1178,10 +1451,16 @@ mod tests {
 
         // A correctly-parented update on the reloaded doc must be accepted, not
         // rejected as DeltaPending.
-        let ts2 = HlcTimestamp { wall_ms: 6, logical: 0, node_id: 1 };
+        let ts2 = HlcTimestamp {
+            wall_ms: 6,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut reloaded,
-            DeltaOp::RevokeCredential { credential_id: "c2".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "c2".to_owned(),
+            },
             ts2,
             &signer,
         )
@@ -1197,8 +1476,14 @@ mod tests {
         let g = doc.frontier()[0].clone();
         let mut d = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "c".to_owned() },
-            HlcTimestamp { wall_ms: 5, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "c".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 5,
+                logical: 0,
+                node_id: 1,
+            },
             signer,
         );
         d.parents = vec![g.clone(), g]; // duplicate → non-canonical
@@ -1223,14 +1508,24 @@ mod tests {
                 suite_type: SuiteType::default(),
                 relationships: crate::core::delta::default_relationships(),
             },
-            HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: 1,
+            },
             &key0,
         )
         .unwrap();
         merge_op(
             &mut a,
-            DeltaOp::RevokeVerificationMethod { key_id: key0.clone() },
-            HlcTimestamp { wall_ms: 20, logical: 0, node_id: 1 },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: key0.clone(),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: 1,
+            },
             &key1,
         )
         .unwrap();
@@ -1242,8 +1537,14 @@ mod tests {
         // (a) imported-revoked key0 is rejected.
         let revoked = merge_op(
             &mut b,
-            DeltaOp::RevokeCredential { credential_id: "y".to_owned() },
-            HlcTimestamp { wall_ms: 30, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "y".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 30,
+                logical: 0,
+                node_id: 1,
+            },
             &key0,
         );
         assert!(revoked.is_err(), "imported-revoked signer must be rejected");
@@ -1252,8 +1553,14 @@ mod tests {
         // DAG entry).
         let added = merge_op(
             &mut b,
-            DeltaOp::RevokeCredential { credential_id: "z".to_owned() },
-            HlcTimestamp { wall_ms: 40, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "z".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 40,
+                logical: 0,
+                node_id: 1,
+            },
             &key1,
         );
         assert!(added.is_ok(), "imported-added signer must be accepted");
@@ -1270,7 +1577,11 @@ mod tests {
                 service_type: "LinkedDomains".to_owned(),
                 endpoint: "https://e.example.com".to_owned(),
             },
-            HlcTimestamp { wall_ms: 5, logical: 0, node_id: 1 },
+            HlcTimestamp {
+                wall_ms: 5,
+                logical: 0,
+                node_id: 1,
+            },
             signer,
         );
         d.parents = doc.frontier();
@@ -1281,7 +1592,11 @@ mod tests {
         // Re-deliver the identical delta — must be a true no-op (no fresh ORSWOT
         // dot, no state/hash/log change).
         doc.merge(d).unwrap();
-        assert_eq!(doc.content_hash().unwrap(), hash1, "duplicate must not change state");
+        assert_eq!(
+            doc.content_hash().unwrap(),
+            hash1,
+            "duplicate must not change state"
+        );
         assert_eq!(doc.delta_count(), count1, "duplicate must not grow the log");
     }
     #[test]
@@ -1292,8 +1607,14 @@ mod tests {
         let signer = doc.verification_methods.entries()[0].id.clone();
         merge_op(
             &mut doc,
-            DeltaOp::RevokeCredential { credential_id: "c".to_owned() },
-            HlcTimestamp { wall_ms: 5, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "c".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 5,
+                logical: 0,
+                node_id: 1,
+            },
             &signer,
         )
         .unwrap();
@@ -1301,7 +1622,11 @@ mod tests {
 
         let value = serde_json::to_value(&doc).unwrap();
         let restored: Document = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.frontier(), expected, "direct serde must rebuild the DAG/frontier");
+        assert_eq!(
+            restored.frontier(),
+            expected,
+            "direct serde must rebuild the DAG/frontier"
+        );
     }
 
     #[test]
@@ -1329,6 +1654,7 @@ mod tests {
             verification_methods: crate::core::crdt::VerificationMethods::new(),
             service_endpoints: crate::core::crdt::ServiceEndpoints::new(),
             document_data: crate::core::crdt::DocumentData::new(),
+            also_known_as: crate::core::crdt::AlsoKnownAs::new(),
             active_key: crate::core::crdt::ActiveKey::new(),
             revocations: crate::core::crdt::Revocations::new(),
             revoked_verification_methods: crate::core::crdt::RevokedVerificationMethods::new(),
@@ -1359,7 +1685,10 @@ mod tests {
         let signer = format!("{}#ghost-key", ref_doc.did);
         let delta = signed_delta(
             &empty,
-            DeltaOp::RotateKey { seq: 1, key_ref: signer.clone() },
+            DeltaOp::RotateKey {
+                seq: 1,
+                key_ref: signer.clone(),
+            },
             &signer,
         );
         assert!(
@@ -1386,7 +1715,10 @@ mod tests {
             },
             &signer,
         );
-        assert!(doc.merge(follow_up).is_err(), "ops after deactivation must be rejected");
+        assert!(
+            doc.merge(follow_up).is_err(),
+            "ops after deactivation must be rejected"
+        );
     }
 
     // ── merge_state() ─────────────────────────────────────────────────────────
@@ -1397,7 +1729,11 @@ mod tests {
         let mut b = a.clone();
 
         // A adds a service, B rotates the key.
-        let ts_a = HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 };
+        let ts_a = HlcTimestamp {
+            wall_ms: 10,
+            logical: 0,
+            node_id: 1,
+        };
         let signer = a.verification_methods.entries()[0].id.clone();
         let svc_id = format!("{}#svc-1", a.did);
         merge_op(
@@ -1412,7 +1748,11 @@ mod tests {
         )
         .unwrap();
 
-        let ts_b = HlcTimestamp { wall_ms: 10, logical: 0, node_id: 2 };
+        let ts_b = HlcTimestamp {
+            wall_ms: 10,
+            logical: 0,
+            node_id: 2,
+        };
         let key_ref = format!("{}#key-0", b.did);
         merge_op(
             &mut b,
@@ -1449,7 +1789,10 @@ mod tests {
         let (doc, _) = make_doc();
         let result = doc.resolve().unwrap();
         assert!(result.did_document.is_some());
-        assert_eq!(result.did_resolution_metadata.content_type, "application/did+ld+json");
+        assert_eq!(
+            result.did_resolution_metadata.content_type,
+            "application/did+ld+json"
+        );
     }
 
     #[test]
@@ -1468,10 +1811,15 @@ mod tests {
         let resolved = result.did_document.unwrap();
         assert_eq!(resolved.verification_method.len(), 1);
         assert_eq!(
-            resolved.verification_method[0].public_key_multibase.as_deref(),
+            resolved.verification_method[0]
+                .public_key_multibase
+                .as_deref(),
             Some("zEd25519TestKey")
         );
-        assert_eq!(resolved.verification_method[0].r#type, "Ed25519VerificationKey2020");
+        assert_eq!(
+            resolved.verification_method[0].r#type,
+            "Ed25519VerificationKey2020"
+        );
         assert_eq!(resolved.authentication.len(), 1);
     }
 
@@ -1479,11 +1827,18 @@ mod tests {
     fn resolve_deactivated_returns_null_document() {
         let (mut doc, _) = make_doc();
         let signer = doc.verification_methods.entries()[0].id.clone();
-        let ts = HlcTimestamp { wall_ms: 1, logical: 0, node_id: 0 };
+        let ts = HlcTimestamp {
+            wall_ms: 1,
+            logical: 0,
+            node_id: 0,
+        };
         merge_op(&mut doc, DeltaOp::Deactivate, ts, &signer).unwrap();
         let result = doc.resolve().unwrap();
         assert!(result.did_document_metadata.deactivated);
-        assert!(result.did_document.is_none(), "deactivated DID must have null document");
+        assert!(
+            result.did_document.is_none(),
+            "deactivated DID must have null document"
+        );
     }
 
     #[test]
@@ -1502,10 +1857,16 @@ mod tests {
         let before = doc.resolve().unwrap().did_document_metadata.version_id;
 
         let signer = doc.verification_methods.entries()[0].id.clone();
-        let ts = HlcTimestamp { wall_ms: 500, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 500,
+            logical: 0,
+            node_id: 1,
+        };
         let mut delta = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-abc".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-abc".to_owned(),
+            },
             ts,
             signer,
         );
@@ -1521,26 +1882,44 @@ mod tests {
         let (doc, _) = make_doc();
         let result = doc.resolve().unwrap();
         // Genesis has wall_ms=0, so created and updated should be epoch.
-        assert_eq!(result.did_document_metadata.created, Some("1970-01-01T00:00:00.000Z".to_owned()));
-        assert_eq!(result.did_document_metadata.updated, Some("1970-01-01T00:00:00.000Z".to_owned()));
+        assert_eq!(
+            result.did_document_metadata.created,
+            Some("1970-01-01T00:00:00.000Z".to_owned())
+        );
+        assert_eq!(
+            result.did_document_metadata.updated,
+            Some("1970-01-01T00:00:00.000Z".to_owned())
+        );
     }
 
     #[test]
     fn resolve_updated_advances_after_mutation() {
         let (mut doc, _) = make_doc();
         let signer = doc.verification_methods.entries()[0].id.clone();
-        let ts = HlcTimestamp { wall_ms: 5000, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 5000,
+            logical: 0,
+            node_id: 1,
+        };
         let mut delta = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-x".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-x".to_owned(),
+            },
             ts,
             signer,
         );
         delta.parents = doc.frontier();
         doc.merge(delta).unwrap();
         let result = doc.resolve().unwrap();
-        assert_eq!(result.did_document_metadata.created, Some("1970-01-01T00:00:00.000Z".to_owned()));
-        assert_ne!(result.did_document_metadata.updated, result.did_document_metadata.created);
+        assert_eq!(
+            result.did_document_metadata.created,
+            Some("1970-01-01T00:00:00.000Z".to_owned())
+        );
+        assert_ne!(
+            result.did_document_metadata.updated,
+            result.did_document_metadata.created
+        );
     }
 
     // ── content_hash() ────────────────────────────────────────────────────────
@@ -1559,10 +1938,16 @@ mod tests {
         let before = doc.content_hash().unwrap();
 
         let signer = doc.verification_methods.entries()[0].id.clone();
-        let ts = HlcTimestamp { wall_ms: 500, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 500,
+            logical: 0,
+            node_id: 1,
+        };
         let mut delta = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-999".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-999".to_owned(),
+            },
             ts,
             signer,
         );
@@ -1601,12 +1986,19 @@ mod tests {
             &signer,
         );
         doc.merge(delta).expect("merge must succeed");
-        assert!(doc.service_endpoints.contains_id(&format!("{}#svc-1", doc.did)));
+        assert!(doc
+            .service_endpoints
+            .contains_id(&format!("{}#svc-1", doc.did)));
 
-        let bytes = doc.to_bytes().expect("to_bytes must succeed with ORSWOT entries");
+        let bytes = doc
+            .to_bytes()
+            .expect("to_bytes must succeed with ORSWOT entries");
         let recovered = Document::from_bytes(&bytes).expect("from_bytes must succeed");
         assert_eq!(doc.did, recovered.did);
-        assert_eq!(doc.service_endpoints.entries(), recovered.service_endpoints.entries());
+        assert_eq!(
+            doc.service_endpoints.entries(),
+            recovered.service_endpoints.entries()
+        );
     }
 
     #[test]
@@ -1628,7 +2020,11 @@ mod tests {
             key: "big".to_owned(),
             value: serde_json::Value::String(big_value),
         };
-        let ts = HlcTimestamp { wall_ms: 100, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 100,
+            logical: 0,
+            node_id: 1,
+        };
         let delta = SignedDelta::unsigned(doc.did.clone(), op, ts, signer);
         let err = doc.merge(delta).unwrap_err();
         assert!(
@@ -1650,8 +2046,604 @@ mod tests {
             key: "ok".to_owned(),
             value: serde_json::Value::String(value),
         };
-        let ts = HlcTimestamp { wall_ms: 200, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 200,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(&mut doc, op, ts, &signer).expect("delta under 64 KiB should be accepted");
+    }
+
+    // ── closure bundle (the includeClosure resolution option) ─────────────────
+
+    /// A real Ed25519-backed document. Unsigned test deltas cannot be replayed:
+    /// `verify_signature` permits an empty proof only at genesis, which is
+    /// exactly the property a replay-based verifier depends on.
+    fn signed_doc() -> (Document, crate::core::delta::SigningKey, String) {
+        use base64ct::{Base64UrlUnpadded, Encoding as _};
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
+        let (doc, _) = Document::new(&pk_mb).unwrap();
+        let key_id = doc.verification_methods.entries()[0].id.clone();
+        (doc, crate::core::delta::SigningKey::Ed25519(sk), key_id)
+    }
+
+    fn node_id_of(key: &crate::core::delta::SigningKey) -> u64 {
+        match key {
+            crate::core::delta::SigningKey::Ed25519(sk) => {
+                crate::core::validate::node_id_from_pubkey(sk.verifying_key().as_bytes())
+            }
+            _ => unreachable!("tests use Ed25519"),
+        }
+    }
+
+    /// Replay a bundle the way selfsame's verifier does: bootstrap from the
+    /// genesis root key — which recomputes the self-certifying DID — and merge.
+    /// Nothing here deserialises a projected document.
+    fn replay(bundle: ClosureBundle, expected: &Document) {
+        let root = bundle
+            .deltas
+            .iter()
+            .find(|d| d.parents.is_empty())
+            .expect("a closure has exactly one genesis delta");
+        let DeltaOp::AddVerificationMethod {
+            public_key_multibase,
+            ..
+        } = &root.op
+        else {
+            panic!("genesis must add a verification method")
+        };
+        let (mut replayed, _) = Document::new(public_key_multibase).unwrap();
+        assert_eq!(
+            replayed.did, expected.did,
+            "genesis must derive the same DID"
+        );
+        replayed.merge_verified_bundle(bundle).unwrap();
+        assert_eq!(
+            replayed.content_hash().unwrap(),
+            expected.content_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn closure_bundle_replays_to_the_same_document() {
+        // The property that matters: a verifier who takes ONLY the bundle, and
+        // trusts none of the projection, reaches the state we would have served.
+        let (mut doc, sk, key_id) = signed_doc();
+        let delta = SignedDelta::new_with_parents(
+            doc.did.clone(),
+            DeltaOp::SetAlsoKnownAs {
+                uris: vec!["acct:hugo@chat.anuna.io".to_owned()],
+            },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: node_id_of(&sk),
+            },
+            doc.dag.frontier(),
+            key_id,
+            &sk,
+        )
+        .unwrap();
+        doc.merge(delta).unwrap();
+
+        let bundle = doc.closure_bundle().unwrap();
+        assert!(
+            bundle
+                .deltas
+                .iter()
+                .any(|d| d.content_hash().unwrap() == bundle.target),
+            "the target must be present in its own bundle, or a replay refuses it"
+        );
+        replay(bundle, &doc);
+    }
+
+    #[test]
+    fn closure_bundle_carries_every_head_not_just_the_target() {
+        // With concurrent heads, the target's ancestry alone omits the other
+        // branch. A verifier replaying that would materialise a document missing
+        // whatever only the other branch carries — a revocation, say — and would
+        // have no way to tell. This is the case a single extract_closure(target)
+        // gets wrong, and the reason closure_bundle unions every head.
+        let (mut doc, sk, key_id) = signed_doc();
+        let genesis_head = doc.dag.frontier();
+
+        for i in [1u64, 2] {
+            let delta = SignedDelta::new_with_parents(
+                doc.did.clone(),
+                DeltaOp::SetDocumentData {
+                    key: format!("branch{i}"),
+                    value: serde_json::json!(i),
+                },
+                HlcTimestamp {
+                    wall_ms: 9 + i,
+                    logical: 0,
+                    node_id: node_id_of(&sk),
+                },
+                genesis_head.clone(),
+                key_id.clone(),
+                &sk,
+            )
+            .unwrap();
+            doc.merge(delta).unwrap();
+        }
+        assert_eq!(doc.dag.frontier().len(), 2, "premise: two concurrent heads");
+
+        let bundle = doc.closure_bundle().unwrap();
+        assert_eq!(bundle.deltas.len(), 3, "genesis plus both branches");
+        replay(bundle, &doc);
+    }
+
+    #[test]
+    fn closure_bundle_is_deterministic_across_replicas() {
+        // `target` names one head; two replicas holding the same state must
+        // name the same one, or a caller comparing two resolvers sees a
+        // difference that is not one.
+        let (mut a, _) = make_doc();
+        let (mut b, _) = make_doc();
+        for doc in [&mut a, &mut b] {
+            let signer = doc.verification_methods.entries()[0].id.clone();
+            merge_op(
+                doc,
+                DeltaOp::SetAlsoKnownAs {
+                    uris: vec!["acct:hugo@chat.anuna.io".to_owned()],
+                },
+                HlcTimestamp {
+                    wall_ms: 10,
+                    logical: 0,
+                    node_id: 1,
+                },
+                &signer,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            a.closure_bundle().unwrap().target,
+            b.closure_bundle().unwrap().target
+        );
+    }
+
+    #[test]
+    fn resolve_omits_the_closure_unless_asked() {
+        // Off by default: the option is what turns it on, and the property must
+        // be absent rather than null so a caller cannot read an omission as an
+        // established empty history.
+        let (doc, _) = make_doc();
+        let result = doc.resolve().unwrap();
+        assert!(result.did_document_metadata.signed_closure.is_none());
+        let json: Value =
+            serde_json::from_str(&serde_json::to_string(&result.did_document_metadata).unwrap())
+                .unwrap();
+        assert!(json.get("signedClosure").is_none());
+    }
+
+    // ── alsoKnownAs ───────────────────────────────────────────────────────────
+
+    fn set_aka(doc: &mut Document, uris: &[&str], ms: u64) -> Result<()> {
+        let signer = doc.verification_methods.entries()[0].id.clone();
+        merge_op(
+            doc,
+            DeltaOp::SetAlsoKnownAs {
+                uris: uris.iter().map(|s| (*s).to_owned()).collect(),
+            },
+            HlcTimestamp {
+                wall_ms: ms,
+                logical: 0,
+                node_id: 1,
+            },
+            &signer,
+        )
+    }
+
+    #[test]
+    fn also_known_as_projects_as_a_typed_property() {
+        let (mut doc, _) = make_doc();
+        set_aka(&mut doc, &["acct:hugo@chat.anuna.io"], 10).unwrap();
+
+        let served = doc.resolve().unwrap().did_document.unwrap();
+        assert_eq!(served.also_known_as, vec!["acct:hugo@chat.anuna.io"]);
+
+        // Exactly one member, unlike the documentData passthrough this replaced.
+        let text = serde_json::to_string(&served).unwrap();
+        assert_eq!(text.matches("\"alsoKnownAs\":").count(), 1);
+        let reparsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            reparsed["alsoKnownAs"],
+            serde_json::json!(["acct:hugo@chat.anuna.io"])
+        );
+    }
+
+    #[test]
+    fn absent_when_empty_rather_than_an_empty_array() {
+        let (doc, _) = make_doc();
+        let served = doc.resolve().unwrap().did_document.unwrap();
+        let reparsed: Value =
+            serde_json::from_str(&serde_json::to_string(&served).unwrap()).unwrap();
+        assert!(reparsed.get("alsoKnownAs").is_none());
+    }
+
+    #[test]
+    fn a_withdrawn_alias_can_be_reinstated() {
+        // The reason this is an LWW register over the whole set rather than the
+        // 2P-Set used for keys. cbcl-bus's WebFinger store can reinstate a
+        // withdrawn alias; if the holder's half could not, a binding either side
+        // withdrew would be permanently unrestorable from one end only.
+        let (mut doc, _) = make_doc();
+        let alias = "acct:hugo@chat.anuna.io";
+
+        set_aka(&mut doc, &[alias], 10).unwrap();
+        set_aka(&mut doc, &[], 20).unwrap();
+        assert!(doc.also_known_as.entries().is_empty(), "withdrawn");
+
+        set_aka(&mut doc, &[alias], 30).unwrap();
+        assert_eq!(doc.also_known_as.entries(), [alias], "reinstated");
+    }
+
+    #[test]
+    fn a_stale_write_does_not_resurrect_a_withdrawn_alias() {
+        // LWW is only safe here if an out-of-order delivery loses. A withdrawal
+        // that could be undone by a delta that merely arrived later would make
+        // withdrawal unreliable, which is the half of the binding that matters.
+        let (mut doc, _) = make_doc();
+        set_aka(&mut doc, &["acct:hugo@chat.anuna.io"], 20).unwrap();
+        set_aka(&mut doc, &[], 30).unwrap();
+
+        set_aka(&mut doc, &["acct:hugo@chat.anuna.io"], 10).unwrap();
+        assert!(
+            doc.also_known_as.entries().is_empty(),
+            "a delta older than the withdrawal must not reinstate the alias"
+        );
+    }
+
+    #[test]
+    fn the_set_is_canonicalised_so_replicas_agree() {
+        // Two replicas writing the same aliases in different order must reach
+        // identical state, or versionId would differ between replicas that agree.
+        let (mut a, _) = make_doc();
+        let (mut b, _) = make_doc();
+        set_aka(&mut a, &["did:crdt:zzz", "acct:hugo@chat.anuna.io"], 10).unwrap();
+        set_aka(
+            &mut b,
+            &["acct:hugo@chat.anuna.io", "did:crdt:zzz", "did:crdt:zzz"],
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(a.also_known_as.entries(), b.also_known_as.entries());
+        assert_eq!(a.content_hash().unwrap(), b.content_hash().unwrap());
+    }
+
+    #[test]
+    fn changing_aliases_moves_the_version_id() {
+        // The alias set is observable state, so it must be inside the content
+        // hash. If it were not, a consumer caching on versionId would never see
+        // an alias withdrawal.
+        let (mut doc, _) = make_doc();
+        let before = doc.resolve().unwrap().did_document_metadata.version_id;
+        set_aka(&mut doc, &["acct:hugo@chat.anuna.io"], 10).unwrap();
+        let after = doc.resolve().unwrap().did_document_metadata.version_id;
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn malformed_aliases_are_refused_at_admission() {
+        let (mut doc, _) = make_doc();
+        for (uri, why) in [
+            ("", "empty"),
+            (
+                "hugo@chat.anuna.io",
+                "no scheme — a bare handle is not a URI",
+            ),
+            ("/relative/path", "relative reference has no base here"),
+            ("1nvalid:x", "scheme must start with a letter"),
+            ("acct:", "empty body"),
+            ("acct:hugo chat", "space"),
+            ("acct:hugo\u{7f}x", "DEL is not printable"),
+            ("acct:hugo\nx", "control character"),
+        ] {
+            assert!(
+                set_aka(&mut doc, &[uri], 10).is_err(),
+                "{uri:?} must be refused ({why})"
+            );
+        }
+        // And the whole delta is refused, not just the offending entry.
+        assert!(set_aka(&mut doc, &["acct:ok@x.io", "no-scheme"], 10).is_err());
+        assert!(doc.also_known_as.entries().is_empty());
+    }
+
+    #[test]
+    fn well_formed_aliases_are_admitted() {
+        // The refusal test above is only meaningful if the forms the binding
+        // actually uses pass.
+        let (mut doc, _) = make_doc();
+        set_aka(
+            &mut doc,
+            &[
+                "acct:hugo@chat.anuna.io",
+                "https://chat.anuna.io/u/hugo",
+                "did:crdt:a9baa8e5",
+            ],
+            10,
+        )
+        .unwrap();
+        assert_eq!(doc.also_known_as.entries().len(), 3);
+    }
+
+    #[test]
+    fn an_oversized_alias_set_is_refused() {
+        let (mut doc, _) = make_doc();
+        let many: Vec<String> = (0..=crate::core::validate::MAX_ALSO_KNOWN_AS)
+            .map(|i| format!("acct:user{i}@x.io"))
+            .collect();
+        let refs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        assert!(set_aka(&mut doc, &refs, 10).is_err());
+
+        let long = format!("acct:{}@x.io", "a".repeat(600));
+        assert!(set_aka(&mut doc, &[&long], 10).is_err());
+    }
+
+    // ── documentData must not shadow DID Core properties ──────────────────────
+    #[test]
+    fn reserved_document_data_key_is_refused_at_admission() {
+        let (mut doc, _) = make_doc();
+        let signer = doc.verification_methods.entries()[0].id.clone();
+        for key in crate::core::resolve::RESERVED_DOCUMENT_PROPERTIES {
+            let err = merge_op(
+                &mut doc,
+                DeltaOp::SetDocumentData {
+                    key: (*key).to_owned(),
+                    value: serde_json::json!("anything"),
+                },
+                HlcTimestamp {
+                    wall_ms: 10,
+                    logical: 0,
+                    node_id: 1,
+                },
+                &signer,
+            );
+            assert!(
+                matches!(err, Err(Error::DeltaRejected(_))),
+                "{key} must be refused as a documentData key"
+            );
+        }
+    }
+
+    #[test]
+    fn state_borne_reserved_key_cannot_shadow_id() {
+        // Admission alone is not enough: state-based merge unions
+        // `document_data` wholesale, so a peer running older code — or a
+        // hostile one — can seat a reserved key without passing `merge`.
+        // Inserted directly here for exactly that reason.
+        let (mut doc, _) = make_doc();
+        let real_did = doc.did.clone();
+        doc.document_data.set(
+            "id".to_owned(),
+            serde_json::json!("did:crdt:ATTACKER"),
+            HlcTimestamp {
+                wall_ms: 99,
+                logical: 0,
+                node_id: 1,
+            },
+        );
+
+        let json_text =
+            serde_json::to_string(&doc.resolve().unwrap().did_document.unwrap()).unwrap();
+        // Reparse rather than inspect the struct: the defect only exists once
+        // the document is serialised, and it is the consumer's parse that
+        // decides which member wins.
+        let reparsed: Value = serde_json::from_str(&json_text).unwrap();
+        assert_eq!(
+            reparsed["id"],
+            serde_json::json!(real_did.as_str()),
+            "documentData must not be able to restate the document's own id"
+        );
+        assert_eq!(
+            json_text.matches("\"id\":").count(),
+            // One for the document, one for its single verification method.
+            2,
+            "no duplicate top-level id member may be emitted"
+        );
+    }
+
+    #[test]
+    fn injected_verification_method_cannot_outlive_its_revoked_key() {
+        // The sharpest form. A key writes a shadow `verificationMethod` into
+        // documentData and is then revoked. Revocation acts on the 2P-Set, and
+        // the injected value does not live there — so before the reserved-name
+        // gate it survived, and a last-wins parser saw ONLY the injected array.
+        // Privilege persisting past revocation is what the 2P-Set exists to
+        // prevent, so this is a regression test for that property, not for a
+        // serialisation nicety.
+        let (mut doc, _) = make_doc();
+        let genesis = doc.verification_methods.entries()[0].id.clone();
+        let k1 = format!("{}#key-1", doc.did);
+        merge_op(
+            &mut doc,
+            DeltaOp::AddVerificationMethod {
+                id: k1.clone(),
+                public_key_multibase: "zSecondKey".to_owned(),
+                suite_type: SuiteType::default(),
+                relationships: crate::core::delta::default_relationships(),
+            },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: 1,
+            },
+            &genesis,
+        )
+        .unwrap();
+
+        let injected = merge_op(
+            &mut doc,
+            DeltaOp::SetDocumentData {
+                key: "verificationMethod".to_owned(),
+                value: serde_json::json!([{"id": "injected", "type": "X", "controller": "c"}]),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: 1,
+            },
+            &k1,
+        );
+        assert!(matches!(injected, Err(Error::DeltaRejected(_))));
+
+        merge_op(
+            &mut doc,
+            DeltaOp::RevokeVerificationMethod { key_id: k1.clone() },
+            HlcTimestamp {
+                wall_ms: 30,
+                logical: 0,
+                node_id: 1,
+            },
+            &genesis,
+        )
+        .unwrap();
+        assert!(doc.is_vm_revoked(&k1));
+
+        let reparsed: Value = serde_json::from_str(
+            &serde_json::to_string(&doc.resolve().unwrap().did_document.unwrap()).unwrap(),
+        )
+        .unwrap();
+        let methods = reparsed["verificationMethod"].as_array().unwrap();
+        assert!(
+            methods
+                .iter()
+                .all(|m| m["id"] != serde_json::json!("injected")),
+            "a revoked key must not leave authentication material behind"
+        );
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0]["id"], serde_json::json!(genesis));
+    }
+
+    // ── genesis key, published so a verifier can recompute the DID ────────────
+    #[test]
+    fn genesis_key_recomputes_the_did() {
+        let (doc, _) = make_doc();
+        let published = doc
+            .genesis_public_key_multibase()
+            .expect("a freshly created document knows its own genesis key");
+
+        // The property is only worth anything if it actually derives the
+        // identifier — assert the relation, not the string.
+        assert_eq!(derive_did(&published).unwrap(), doc.did);
+        assert_eq!(published, "zEd25519TestKey");
+    }
+
+    #[test]
+    fn genesis_key_survives_revocation_of_that_key() {
+        // The whole reason this property exists. `resolve` filters revoked keys
+        // out of `verificationMethod`, so after rotation the document no longer
+        // carries the input its own identifier derives from. The metadata must
+        // still carry it, or the relation becomes uncheckable at exactly the
+        // point a verifier most wants to check it.
+        let (mut doc, _) = make_doc();
+        let genesis_id = doc.verification_methods.entries()[0].id.clone();
+        let key1_id = format!("{}#key-1", doc.did);
+        merge_op(
+            &mut doc,
+            DeltaOp::AddVerificationMethod {
+                id: key1_id.clone(),
+                public_key_multibase: "zSecondKey".to_owned(),
+                suite_type: SuiteType::default(),
+                relationships: crate::core::delta::default_relationships(),
+            },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: 1,
+            },
+            &genesis_id,
+        )
+        .unwrap();
+        merge_op(
+            &mut doc,
+            DeltaOp::RevokeVerificationMethod {
+                key_id: genesis_id.clone(),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: 1,
+            },
+            &key1_id,
+        )
+        .unwrap();
+
+        let result = doc.resolve().unwrap();
+        let served = result.did_document.unwrap();
+
+        // Precondition: the served document has genuinely lost the key.
+        assert!(
+            !served
+                .verification_method
+                .iter()
+                .any(|m| m.id == genesis_id),
+            "the revoked genesis key must not appear in the served document"
+        );
+
+        // And the metadata still lets a verifier close the loop.
+        let published = result
+            .did_document_metadata
+            .genesis_public_key_multibase
+            .expect("genesis key must outlive its own revocation in metadata");
+        assert_eq!(derive_did(&published).unwrap(), doc.did);
+    }
+
+    #[test]
+    fn a_shadowing_key_0_entry_does_not_displace_the_genesis_key() {
+        // The set is a G-Set of whole entries, so an `id` is not unique: adding
+        // a second `#key-0` carrying a different key leaves BOTH present. If
+        // this property were resolved by name it would be resolved by sort
+        // order, and this is the entry that would decide it.
+        let (mut doc, _) = make_doc();
+        let genesis_id = format!("{}#key-0", doc.did);
+        doc.verification_methods.insert(
+            genesis_id.clone(),
+            "zAAAShadowSortsFirst".to_owned(),
+            SuiteType::default(),
+            crate::core::delta::default_relationships(),
+        );
+        assert_eq!(
+            doc.verification_methods
+                .entries()
+                .iter()
+                .filter(|e| e.id == genesis_id)
+                .count(),
+            2,
+            "premise: both entries coexist under one id"
+        );
+
+        let published = doc
+            .genesis_public_key_multibase()
+            .expect("the genuine genesis key must still be found");
+        assert_eq!(published, "zEd25519TestKey");
+        assert_eq!(derive_did(&published).unwrap(), doc.did);
+    }
+
+    #[test]
+    fn genesis_key_is_omitted_when_no_held_key_derives_the_did() {
+        // Models the substitution this property exists to expose: state served
+        // under a DID that none of its keys derive. Emitting a plausible-looking
+        // key here would invite a verifier to conclude the relation holds.
+        let (mut doc, _) = make_doc();
+        doc.did = derive_did("zSomeOtherKeyEntirely").unwrap();
+
+        assert_eq!(
+            doc.genesis_public_key_multibase(),
+            None,
+            "no key derives this DID, so nothing may be published"
+        );
+        assert!(doc
+            .resolve()
+            .unwrap()
+            .did_document_metadata
+            .genesis_public_key_multibase
+            .is_none());
     }
 
     #[test]
@@ -1660,7 +2652,11 @@ mod tests {
         // Add a second key so we can revoke the first without leaving the doc keyless.
         let signer = doc.verification_methods.entries()[0].id.clone();
         let key1_id = format!("{}#key-1", doc.did);
-        let ts1 = HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 };
+        let ts1 = HlcTimestamp {
+            wall_ms: 10,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut doc,
             DeltaOp::AddVerificationMethod {
@@ -1673,13 +2669,27 @@ mod tests {
             &signer,
         )
         .unwrap();
-        assert_eq!(doc.resolve().unwrap().did_document.unwrap().verification_method.len(), 2);
+        assert_eq!(
+            doc.resolve()
+                .unwrap()
+                .did_document
+                .unwrap()
+                .verification_method
+                .len(),
+            2
+        );
 
         // Revoke the genesis key.
-        let ts2 = HlcTimestamp { wall_ms: 20, logical: 0, node_id: 1 };
+        let ts2 = HlcTimestamp {
+            wall_ms: 20,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut doc,
-            DeltaOp::RevokeVerificationMethod { key_id: signer.clone() },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: signer.clone(),
+            },
             ts2,
             &key1_id,
         )
@@ -1699,7 +2709,11 @@ mod tests {
         let key1_id = format!("{}#key-1", doc.did);
 
         // Add second key, then revoke key-0.
-        let ts1 = HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 };
+        let ts1 = HlcTimestamp {
+            wall_ms: 10,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut doc,
             DeltaOp::AddVerificationMethod {
@@ -1713,17 +2727,27 @@ mod tests {
         )
         .unwrap();
 
-        let ts2 = HlcTimestamp { wall_ms: 20, logical: 0, node_id: 1 };
+        let ts2 = HlcTimestamp {
+            wall_ms: 20,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut doc,
-            DeltaOp::RevokeVerificationMethod { key_id: key0.clone() },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: key0.clone(),
+            },
             ts2,
             &key1_id,
         )
         .unwrap();
 
         // Attempt to use revoked key-0 — must be rejected.
-        let ts3 = HlcTimestamp { wall_ms: 30, logical: 0, node_id: 1 };
+        let ts3 = HlcTimestamp {
+            wall_ms: 30,
+            logical: 0,
+            node_id: 1,
+        };
         let res = merge_op(
             &mut doc,
             DeltaOp::SetDocumentData {
@@ -1743,7 +2767,11 @@ mod tests {
         let key1_id = format!("{}#key-1", a.did);
 
         // Add key-1 on both replicas.
-        let ts1 = HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 };
+        let ts1 = HlcTimestamp {
+            wall_ms: 10,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut a,
             DeltaOp::AddVerificationMethod {
@@ -1760,10 +2788,16 @@ mod tests {
         let mut b = a.clone();
 
         // Replica A: revoke key-0.
-        let ts2 = HlcTimestamp { wall_ms: 20, logical: 0, node_id: 1 };
+        let ts2 = HlcTimestamp {
+            wall_ms: 20,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut a,
-            DeltaOp::RevokeVerificationMethod { key_id: key0.clone() },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: key0.clone(),
+            },
             ts2,
             &key1_id,
         )
@@ -1775,7 +2809,15 @@ mod tests {
         // Merge A into B — revocation must propagate.
         b.merge_state(a.clone()).unwrap();
         assert!(b.is_vm_revoked(&key0));
-        assert_eq!(b.resolve().unwrap().did_document.unwrap().verification_method.len(), 1);
+        assert_eq!(
+            b.resolve()
+                .unwrap()
+                .did_document
+                .unwrap()
+                .verification_method
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1785,7 +2827,11 @@ mod tests {
         assert_eq!(doc.delta_count(), 1);
 
         let signer = doc.verification_methods.entries()[0].id.clone();
-        let ts = HlcTimestamp { wall_ms: 100, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 100,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut doc,
             DeltaOp::SetDocumentData {
@@ -1807,7 +2853,11 @@ mod tests {
 
         // Apply a delta to a.
         let signer = a.verification_methods.entries()[0].id.clone();
-        let ts = HlcTimestamp { wall_ms: 100, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 100,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut a,
             DeltaOp::SetDocumentData {
@@ -1825,7 +2875,11 @@ mod tests {
 
         // merge_state should NOT merge delta logs.
         a.merge_state(b).unwrap();
-        assert_eq!(a.delta_count(), 2, "delta log must not change on state merge");
+        assert_eq!(
+            a.delta_count(),
+            2,
+            "delta log must not change on state merge"
+        );
     }
 
     // ── Verification relationship tests ─────────────────────────────────────
@@ -1848,7 +2902,11 @@ mod tests {
         let (mut doc, _) = make_doc();
         let signer = doc.verification_methods.entries()[0].id.clone();
         let key1_id = format!("{}#key-1", doc.did);
-        let ts1 = HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 };
+        let ts1 = HlcTimestamp {
+            wall_ms: 10,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut doc,
             DeltaOp::AddVerificationMethod {
@@ -1876,7 +2934,10 @@ mod tests {
         assert_eq!(resolved.key_agreement.len(), 1);
         assert_eq!(resolved.key_agreement[0], Value::String(key1_id.clone()));
         assert_eq!(resolved.capability_invocation.len(), 1);
-        assert_eq!(resolved.capability_invocation[0], Value::String(key1_id.clone()));
+        assert_eq!(
+            resolved.capability_invocation[0],
+            Value::String(key1_id.clone())
+        );
         assert_eq!(resolved.capability_delegation.len(), 1);
         assert_eq!(resolved.capability_delegation[0], Value::String(key1_id));
     }
@@ -1886,7 +2947,11 @@ mod tests {
         let (mut doc, _) = make_doc();
         let signer = doc.verification_methods.entries()[0].id.clone();
         let key1_id = format!("{}#key-1", doc.did);
-        let ts1 = HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 };
+        let ts1 = HlcTimestamp {
+            wall_ms: 10,
+            logical: 0,
+            node_id: 1,
+        };
         merge_op(
             &mut doc,
             DeltaOp::AddVerificationMethod {
@@ -1907,10 +2972,22 @@ mod tests {
 
         let resolved = doc.resolve().unwrap().did_document.unwrap();
         let json = serde_json::to_value(&resolved).unwrap();
-        assert!(json.get("assertionMethod").is_some(), "assertionMethod key must be present");
-        assert!(json.get("keyAgreement").is_some(), "keyAgreement key must be present");
-        assert!(json.get("capabilityInvocation").is_some(), "capabilityInvocation key must be present");
-        assert!(json.get("capabilityDelegation").is_some(), "capabilityDelegation key must be present");
+        assert!(
+            json.get("assertionMethod").is_some(),
+            "assertionMethod key must be present"
+        );
+        assert!(
+            json.get("keyAgreement").is_some(),
+            "keyAgreement key must be present"
+        );
+        assert!(
+            json.get("capabilityInvocation").is_some(),
+            "capabilityInvocation key must be present"
+        );
+        assert!(
+            json.get("capabilityDelegation").is_some(),
+            "capabilityDelegation key must be present"
+        );
         assert!(json.get("assertion_method").is_none());
         assert!(json.get("key_agreement").is_none());
         assert!(json.get("capability_invocation").is_none());
@@ -1938,7 +3015,11 @@ mod tests {
                 suite_type: SuiteType::default(),
                 relationships: crate::core::delta::default_relationships(),
             },
-            HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: 1,
+            },
             &key0,
         )
         .unwrap();
@@ -1947,8 +3028,14 @@ mod tests {
         // A: key0 revokes key1.
         let mut a = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeVerificationMethod { key_id: key1.clone() },
-            HlcTimestamp { wall_ms: 20, logical: 0, node_id: 1 },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: key1.clone(),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: 1,
+            },
             key0,
         );
         a.parents = fork.clone();
@@ -1961,7 +3048,11 @@ mod tests {
                 service_type: "X".to_owned(),
                 endpoint: "https://e.example.com".to_owned(),
             },
-            HlcTimestamp { wall_ms: 21, logical: 0, node_id: 1 },
+            HlcTimestamp {
+                wall_ms: 21,
+                logical: 0,
+                node_id: 1,
+            },
             key1,
         );
         b.parents = fork;
@@ -1997,30 +3088,53 @@ mod tests {
         let signer = a.verification_methods.entries()[0].id.clone();
         merge_op(
             &mut a,
-            DeltaOp::RevokeCredential { credential_id: "c1".to_owned() },
-            HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "c1".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: 1,
+            },
             &signer,
         )
         .unwrap();
         let a_frontier = a.frontier();
-        assert_ne!(a_frontier, make_doc().0.frontier(), "A advanced past genesis");
+        assert_ne!(
+            a_frontier,
+            make_doc().0.frontier(),
+            "A advanced past genesis"
+        );
 
         // Receiver B (fresh) imports A's state.
         let (mut b, _) = make_doc();
         b.merge_state(a).unwrap();
-        assert_eq!(b.frontier(), a_frontier, "merge_state must import the frontier/history");
+        assert_eq!(
+            b.frontier(),
+            a_frontier,
+            "merge_state must import the frontier/history"
+        );
 
         // A delta parented on the imported update must admit, not be held pending
         // for a parent missing from B's DAG.
         let mut peer = SignedDelta::unsigned(
             b.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "c2".to_owned() },
-            HlcTimestamp { wall_ms: 20, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "c2".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: 1,
+            },
             signer,
         );
         peer.parents = a_frontier;
         let res = b.merge(peer);
-        assert!(res.is_ok(), "delta parented on the imported update must admit, got {res:?}");
+        assert!(
+            res.is_ok(),
+            "delta parented on the imported update must admit, got {res:?}"
+        );
     }
 
     /// A document deserialised with CRDT state but no delta log (the pre-DAG
@@ -2057,7 +3171,11 @@ mod tests {
                 suite_type: SuiteType::default(),
                 relationships: crate::core::delta::default_relationships(),
             },
-            HlcTimestamp { wall_ms: 10, logical: 0, node_id: 1 },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: 1,
+            },
             &key0,
         )
         .unwrap();
@@ -2065,8 +3183,14 @@ mod tests {
         // key1 signs a delta parented ONLY on genesis, excluding its own AddVM.
         let mut evil = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "pwned".to_owned() },
-            HlcTimestamp { wall_ms: 20, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "pwned".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: 1,
+            },
             key1,
         );
         evil.parents = vec![genesis.content_hash().unwrap()];
@@ -2092,8 +3216,10 @@ mod tests {
         fn signed_doc() -> (Document, SigningKey, String, u64) {
             let sk = ed25519_dalek::SigningKey::from_bytes(&OWNER_SEED);
             let nid = node_id_from_pubkey(sk.verifying_key().as_bytes());
-            let pk_mb =
-                format!("u{}", Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes()));
+            let pk_mb = format!(
+                "u{}",
+                Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+            );
             let (doc, _) = Document::new(&pk_mb).unwrap();
             let key_id = doc.verification_methods.entries()[0].id.clone();
             (doc, SigningKey::Ed25519(sk), key_id, nid)
@@ -2124,7 +3250,11 @@ mod tests {
             SignedDelta::new_with_parents(
                 doc.did.clone(),
                 op,
-                HlcTimestamp { wall_ms: wall, logical: 0, node_id: nid },
+                HlcTimestamp {
+                    wall_ms: wall,
+                    logical: 0,
+                    node_id: nid,
+                },
                 doc.frontier(),
                 key_id.to_owned(),
                 sk,
@@ -2166,11 +3296,16 @@ mod tests {
             // A delta claiming the real authorised key id but signed by a key the
             // document never authorised. node_id is the real one, so it is the
             // *signature* check (not node binding) that must reject it.
-            let attacker = SigningKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&ATTACKER_SEED));
+            let attacker =
+                SigningKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&ATTACKER_SEED));
             let forged = SignedDelta::new_with_parents(
                 sender.did.clone(),
                 svc(&sender, 99),
-                HlcTimestamp { wall_ms: 5_000, logical: 0, node_id: nid },
+                HlcTimestamp {
+                    wall_ms: 5_000,
+                    logical: 0,
+                    node_id: nid,
+                },
                 sender.frontier(),
                 key_id,
                 &attacker,
@@ -2235,7 +3370,10 @@ mod tests {
 
             let mut receiver = fresh_receiver();
             assert_eq!(receiver.merge_verified_bundle(bundle).unwrap(), 3);
-            assert_eq!(receiver.content_hash().unwrap(), sender.content_hash().unwrap());
+            assert_eq!(
+                receiver.content_hash().unwrap(),
+                sender.content_hash().unwrap()
+            );
         }
 
         #[test]
@@ -2246,8 +3384,16 @@ mod tests {
             let mut receiver = fresh_receiver();
             assert_eq!(receiver.merge_verified_bundle(bundle.clone()).unwrap(), 3);
             let h = receiver.content_hash().unwrap();
-            assert_eq!(receiver.merge_verified_bundle(bundle).unwrap(), 0, "re-merge applies nothing");
-            assert_eq!(receiver.content_hash().unwrap(), h, "state unchanged on re-merge");
+            assert_eq!(
+                receiver.merge_verified_bundle(bundle).unwrap(),
+                0,
+                "re-merge applies nothing"
+            );
+            assert_eq!(
+                receiver.content_hash().unwrap(),
+                h,
+                "state unchanged on re-merge"
+            );
         }
 
         #[test]
@@ -2257,11 +3403,16 @@ mod tests {
 
             // One genuinely valid new delta and one forged delta, both new.
             let good = signed_on(&sender, svc(&sender, 4), &key_id, nid, &sk, 7_000);
-            let attacker = SigningKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&ATTACKER_SEED));
+            let attacker =
+                SigningKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&ATTACKER_SEED));
             let bad = SignedDelta::new_with_parents(
                 sender.did.clone(),
                 svc(&sender, 5),
-                HlcTimestamp { wall_ms: 7_001, logical: 0, node_id: nid },
+                HlcTimestamp {
+                    wall_ms: 7_001,
+                    logical: 0,
+                    node_id: nid,
+                },
                 sender.frontier(),
                 key_id,
                 &attacker,
@@ -2274,7 +3425,11 @@ mod tests {
             let before = receiver.content_hash().unwrap();
             let log_len = receiver.delta_count();
             assert!(receiver.merge_verified_bundle(bundle).is_err());
-            assert_eq!(receiver.content_hash().unwrap(), before, "no partial application");
+            assert_eq!(
+                receiver.content_hash().unwrap(),
+                before,
+                "no partial application"
+            );
             assert_eq!(receiver.delta_count(), log_len, "delta log unchanged");
         }
     }
@@ -2319,7 +3474,10 @@ mod tests {
 
         assert_eq!(resolved.verification_method.len(), 1);
         assert!(resolved.assertion_method.is_empty());
-        assert!(!resolved.verification_method.iter().any(|m| m.r#type == "JsonWebKey"));
+        assert!(!resolved
+            .verification_method
+            .iter()
+            .any(|m| m.r#type == "JsonWebKey"));
     }
 
     /// An asserting key is twinned, at `#jwk-0`, carrying the same key material.
@@ -2346,16 +3504,28 @@ mod tests {
 
         assert_eq!(twin.r#type, "JsonWebKey");
         assert_eq!(twin.controller, doc.did.to_string());
-        assert!(twin.public_key_multibase.is_none(), "a twin carries one encoding, not two");
+        assert!(
+            twin.public_key_multibase.is_none(),
+            "a twin carries one encoding, not two"
+        );
 
-        let jwk = twin.public_key_jwk.as_ref().expect("a twin carries publicKeyJwk");
+        let jwk = twin
+            .public_key_jwk
+            .as_ref()
+            .expect("a twin carries publicKeyJwk");
         assert_eq!(jwk["kty"], "OKP");
         assert_eq!(jwk["crv"], "Ed25519");
         assert_eq!(jwk["x"], Base64UrlUnpadded::encode_string(&raw));
-        assert!(jwk.get("d").is_none(), "a projection has no private component to leak");
+        assert!(
+            jwk.get("d").is_none(),
+            "a projection has no private component to leak"
+        );
 
         // And it is reachable as an assertion method, which is the point.
-        assert!(resolved.assertion_method.iter().any(|r| r.as_str() == Some(twin_id.as_str())));
+        assert!(resolved
+            .assertion_method
+            .iter()
+            .any(|r| r.as_str() == Some(twin_id.as_str())));
     }
 
     /// The DID is a hash of the genesis op. A projection computed at resolution
@@ -2372,7 +3542,10 @@ mod tests {
         assert_asserting(&mut doc, &id, &mb);
 
         let resolved = doc.resolve().unwrap().did_document.unwrap();
-        assert!(resolved.verification_method.iter().any(|m| m.r#type == "JsonWebKey"));
+        assert!(resolved
+            .verification_method
+            .iter()
+            .any(|m| m.r#type == "JsonWebKey"));
         assert_eq!(doc.did.to_string(), before);
         assert_eq!(resolved.id, before);
     }
@@ -2427,10 +3600,17 @@ mod tests {
             .iter()
             .any(|m| m.r#type == "JsonWebKey"));
 
-        doc.apply_op(&DeltaOp::RevokeVerificationMethod { key_id: id }, next_ts(), &[]).unwrap();
+        doc.apply_op(
+            &DeltaOp::RevokeVerificationMethod { key_id: id },
+            next_ts(),
+            &[],
+        )
+        .unwrap();
 
         let resolved = doc.resolve().unwrap().did_document.unwrap();
-        assert!(!resolved.verification_method.iter().any(|m| m.r#type == "JsonWebKey"));
+        assert!(!resolved
+            .verification_method
+            .iter()
+            .any(|m| m.r#type == "JsonWebKey"));
     }
-
 }

@@ -11,7 +11,7 @@
 
 use did_crdt::{
     core::{
-        delta::{DeltaOp, SignedDelta, SuiteType, default_relationships},
+        delta::{default_relationships, DeltaOp, SignedDelta, SuiteType},
         hlc::HlcTimestamp,
     },
     Document,
@@ -30,7 +30,11 @@ fn signer(doc: &Document) -> String {
 }
 
 fn ts(wall: u64, node: u64) -> HlcTimestamp {
-    HlcTimestamp { wall_ms: wall, logical: 0, node_id: node }
+    HlcTimestamp {
+        wall_ms: wall,
+        logical: 0,
+        node_id: node,
+    }
 }
 
 fn unsigned_delta(doc: &Document, op: DeltaOp, timestamp: HlcTimestamp) -> SignedDelta {
@@ -52,15 +56,17 @@ fn assert_converged(a: &Document, b: &Document) {
     let ra = a.resolve().expect("resolve a");
     let rb = b.resolve().expect("resolve b");
     assert_eq!(
-        ra.did_document_metadata.version_id,
-        rb.did_document_metadata.version_id,
+        ra.did_document_metadata.version_id, rb.did_document_metadata.version_id,
         "version_id must match after convergence"
     );
     let da = ra.did_document.as_ref().expect("document a");
     let db = rb.did_document.as_ref().expect("document b");
     let ja = serde_json::to_string(da).expect("serialize a");
     let jb = serde_json::to_string(db).expect("serialize b");
-    assert_eq!(ja, jb, "resolved documents must be identical after convergence");
+    assert_eq!(
+        ja, jb,
+        "resolved documents must be identical after convergence"
+    );
 }
 
 // ── Test 1: Disjoint deltas converge ────────────────────────────────────────
@@ -113,7 +119,11 @@ fn disjoint_deltas_converge() {
     // Both mutations must be present.
     let result = merged_a.resolve().expect("resolve merged");
     let doc = result.did_document.as_ref().expect("document");
-    assert_eq!(doc.service.len(), 1, "service endpoint from A must be present");
+    assert_eq!(
+        doc.service.len(),
+        1,
+        "service endpoint from A must be present"
+    );
     assert_eq!(
         doc.extra.get("name"),
         Some(&serde_json::json!("replica-b-value")),
@@ -194,10 +204,7 @@ fn all_permutations_converge() {
     // All must be identical.
     let first = &resolved_states[0];
     for (i, state) in resolved_states.iter().enumerate().skip(1) {
-        assert_eq!(
-            first, state,
-            "permutation {i} diverged from permutation 0"
-        );
+        assert_eq!(first, state, "permutation {i} diverged from permutation 0");
     }
 }
 
@@ -241,25 +248,33 @@ fn duplicate_delivery_is_idempotent() {
     let mut once = base.clone();
     once.merge(delta.clone()).expect("first apply");
 
-    let state_once = serde_json::to_string(&once.resolve().expect("resolve once"))
-        .expect("serialize once");
+    let state_once =
+        serde_json::to_string(&once.resolve().expect("resolve once")).expect("serialize once");
 
     // Apply twice.
     let mut twice = base.clone();
     twice.merge(delta.clone()).expect("first apply");
-    twice.merge(delta.clone()).expect("second apply (duplicate)");
+    twice
+        .merge(delta.clone())
+        .expect("second apply (duplicate)");
 
-    let state_twice = serde_json::to_string(&twice.resolve().expect("resolve twice"))
-        .expect("serialize twice");
+    let state_twice =
+        serde_json::to_string(&twice.resolve().expect("resolve twice")).expect("serialize twice");
 
-    assert_eq!(state_once, state_twice, "duplicate delta delivery must be idempotent");
+    assert_eq!(
+        state_once, state_twice,
+        "duplicate delta delivery must be idempotent"
+    );
 
     // Also verify via state-based merge: merging with self is idempotent.
     let mut self_merged = once.clone();
     self_merged.merge_state(once.clone()).expect("self merge");
     let state_self = serde_json::to_string(&self_merged.resolve().expect("resolve self"))
         .expect("serialize self");
-    assert_eq!(state_once, state_self, "state-based self-merge must be idempotent");
+    assert_eq!(
+        state_once, state_self,
+        "state-based self-merge must be idempotent"
+    );
 }
 
 /// Verify idempotence across multiple delta types, not just services.
@@ -301,8 +316,8 @@ fn duplicate_delivery_idempotent_mixed_ops() {
     for d in &deltas {
         let _ = once.merge(d.clone());
     }
-    let state_once = serde_json::to_string(&once.resolve().expect("resolve once"))
-        .expect("serialize once");
+    let state_once =
+        serde_json::to_string(&once.resolve().expect("resolve once")).expect("serialize once");
 
     // Apply all deltas twice each.
     let mut twice = base.clone();
@@ -310,8 +325,8 @@ fn duplicate_delivery_idempotent_mixed_ops() {
         let _ = twice.merge(d.clone());
         let _ = twice.merge(d.clone()); // duplicate
     }
-    let state_twice = serde_json::to_string(&twice.resolve().expect("resolve twice"))
-        .expect("serialize twice");
+    let state_twice =
+        serde_json::to_string(&twice.resolve().expect("resolve twice")).expect("serialize twice");
 
     assert_eq!(
         state_once, state_twice,
@@ -399,14 +414,22 @@ fn offline_replicas_merge_correctly() {
 
     // ── Merge all pairs ─────────────────────────────────────────────────────
     // A merges B and C.
-    replica_a.merge_state(replica_b.clone()).expect("A merges B");
-    replica_a.merge_state(replica_c.clone()).expect("A merges C");
+    replica_a
+        .merge_state(replica_b.clone())
+        .expect("A merges B");
+    replica_a
+        .merge_state(replica_c.clone())
+        .expect("A merges C");
 
     // B merges A (which now has C) — gets everything.
-    replica_b.merge_state(replica_a.clone()).expect("B merges A+C");
+    replica_b
+        .merge_state(replica_a.clone())
+        .expect("B merges A+C");
 
     // C merges A (which now has B) — gets everything.
-    replica_c.merge_state(replica_a.clone()).expect("C merges A+B");
+    replica_c
+        .merge_state(replica_a.clone())
+        .expect("C merges A+B");
 
     // ── Assert convergence ──────────────────────────────────────────────────
     assert_converged(&replica_a, &replica_b);
@@ -535,13 +558,19 @@ fn delta_path_requires_causal_order_and_resolves_on_delivery() {
     let mut author = base.clone();
     let d1 = unsigned_delta(
         &author,
-        DeltaOp::SetDocumentData { key: "a".to_owned(), value: serde_json::json!(1) },
+        DeltaOp::SetDocumentData {
+            key: "a".to_owned(),
+            value: serde_json::json!(1),
+        },
         ts(100, 1),
     );
     author.merge(d1.clone()).expect("author applies d1");
     let d2 = unsigned_delta(
         &author,
-        DeltaOp::SetDocumentData { key: "b".to_owned(), value: serde_json::json!(2) },
+        DeltaOp::SetDocumentData {
+            key: "b".to_owned(),
+            value: serde_json::json!(2),
+        },
         ts(200, 1),
     );
     author.merge(d2.clone()).expect("author applies d2");
@@ -552,7 +581,10 @@ fn delta_path_requires_causal_order_and_resolves_on_delivery() {
     let mut replica = base.clone();
     match replica.merge(d2.clone()) {
         Err(Error::DeltaPending { missing }) => {
-            assert!(missing.contains(&d1_hash), "must report d1 as the missing ancestor");
+            assert!(
+                missing.contains(&d1_hash),
+                "must report d1 as the missing ancestor"
+            );
         }
         other => panic!("expected DeltaPending for out-of-causal-order delta, got {other:?}"),
     }
@@ -560,6 +592,8 @@ fn delta_path_requires_causal_order_and_resolves_on_delivery() {
     // Deliver in causal order (Reject/retry): d1 then re-submit d2. Both apply,
     // and the replica converges with the author.
     replica.merge(d1).expect("d1 applies");
-    replica.merge(d2).expect("d2 applies once its predecessor is present");
+    replica
+        .merge(d2)
+        .expect("d2 applies once its predecessor is present");
     assert_converged(&author, &replica);
 }

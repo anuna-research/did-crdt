@@ -1,10 +1,10 @@
 ---
 title: "SPEC-032: did-crdt — Coordination-Free Decentralised Identifiers via Signed CRDTs"
 id: SPEC-032
-version: 0.1.0
+version: 0.4.0
 status: draft
 created: 2026-03-10
-last_updated: 2026-06-11
+last_updated: 2026-08-13
 authors: Anuna Research
 reviewers: Engineering, Security
 audience: stakeholders, engineers, protocol designers
@@ -533,10 +533,17 @@ containing:
 - didDocumentMetadata with created, updated, versionId (BLAKE3 of state)
 
 The resolved document SHALL validate against the DID Core JSON-LD schema.
+This forbids duplicate members: a document carrying two `id` values does not
+validate, and its meaning would be decided by the consumer's parser rather than
+by this system. See BUG-001.
 
 Trace:
 - TEST-011
+- TEST-025
+- TEST-026
+- TEST-027
 - CON-003
+- BUG-001
 ```
 
 ```
@@ -642,6 +649,103 @@ Trace:
 ```
 
 ---
+
+```
+REQ-015: alsoKnownAs Alias Set
+
+The system SHALL maintain a set of `alsoKnownAs` URIs as a last-writer-wins
+register over the WHOLE set, and SHALL project it as the DID Core
+`alsoKnownAs` property.
+
+A SetAlsoKnownAs delta SHALL replace the set entirely. An empty vector SHALL
+withdraw every alias, and a subsequent delta SHALL be able to reinstate a
+previously withdrawn alias.
+
+Two separate facts decide the CRDT, and they are worth keeping apart.
+
+Reinstatement rules OUT a 2P-Set. The alias binding is two-party: the holder
+asserts it here and the application publishes the reciprocal record. The
+application half is reinstatable, so a 2P-Set -- the shape used for
+verification methods -- would make the halves asymmetric, leaving a binding the
+holder withdrew permanently unrestorable from one end while restorable from the
+other.
+
+The SINGLE-ALIAS shape is what makes a whole-set register admissible rather
+than per-element LWW. A whole-set register replaces everything on each write,
+so concurrent writes do not union -- the later timestamp wins and the other is
+lost. That is acceptable only because the set holds one alias, derived from the
+home DID and the account authority: one writer-of-record, one lifecycle, and
+"replace the set" and "change the alias" are the same operation. With one
+element the two shapes are indistinguishable.
+
+CEILING (SIMPLIFY). A second independently-managed alias breaks this. Two
+aliases with separate lifecycles reintroduce lost updates, and the write that
+loses may be the one carrying the derived alias the reciprocal binding depends
+on. Whole-set replacement assumes read-modify-write, which is the race CRDTs
+exist to avoid. The upgrade is per-element LWW keyed on the URI, plus a
+per-element delta op -- a whole-set op would have to diff against current state
+and so reintroduce the read-modify-write. It also brings tombstones, which
+cannot be collected without causal stability this design deliberately lacks.
+
+The cardinality bound in CON-007 is a resource bound against replicated bloat.
+It is NOT what keeps the above true: nothing mechanical enforces the
+single-alias shape, which is a property of how aliases are minted.
+
+The set SHALL be canonicalised (sorted, deduplicated) before storage, so that
+replicas which agree on the aliases agree on the content hash regardless of the
+order they were written in.
+
+The alias set SHALL be part of observable state for content-addressing
+purposes, so that a change to it moves `versionId`.
+
+Every URI SHALL be recognised in full before any part of the delta is applied,
+per CON-007. A delta carrying any unrecognised URI SHALL be rejected whole.
+
+Trace:
+- TEST-028
+- TEST-029
+- TEST-030
+- CON-007
+```
+
+```
+REQ-016: Signed Closure Retrieval
+
+The system SHALL, when a resolution request carries the `includeClosure`
+option, return the signed deltas from which the DID document was materialised,
+as a causal-closure bundle of { target, deltas }.
+
+WHY THIS EXISTS. A projected DID document carries no signatures. A verifier
+that deserialises one has made the RESOLVER authoritative on the DID's own
+revocations -- it is taking the resolver's word for which keys are valid. A
+verifier that replays the deltas instead makes the SIGNATURES authoritative,
+which is the only basis on which a resolver operated by someone else can be
+relied upon. Without this, an independently-operated resolver is not usable by
+a verifier that does not already trust its operator.
+
+The bundle SHALL include the causal closure of EVERY frontier head, not only
+the target's. With concurrent heads, one head's ancestry omits the other
+branch, and a verifier replaying it would materialise a document missing
+whatever only that branch carries -- a revocation, for instance -- with no way
+to detect the omission.
+
+`target` SHALL name one head deterministically, so replicas holding the same
+state return the same target and a caller comparing two resolvers does not see
+a difference that is not one. It names the head the bundle was extracted at and
+is not a claim that it is the only head.
+
+The system SHALL refuse rather than serve an incomplete closure: if a required
+ancestor is not held, no sound bundle can be built.
+
+The bundle SHALL be omitted unless requested. It carries the whole history, and
+a caller that wants only the document must not pay for evidence it will not
+read.
+
+Trace:
+- TEST-031
+- TEST-032
+- CON-003
+```
 
 ## 8. Non-Functional Requirements
 
@@ -1154,6 +1258,32 @@ Content-Type: application/did+ld+json
   }
 }
 
+GET /{did}?includeClosure=true
+
+Adds `didDocumentMetadata.signedClosure` -- the signed deltas the document was
+materialised from, as { target, deltas }:
+
+  "didDocumentMetadata": {
+    ...,
+    "signedClosure": { "target": "<delta-hash>", "deltas": [ <SignedDelta>, ... ] }
+  }
+
+Omitted unless requested, and absent rather than null when omitted. A resolver
+that cannot extract a sound closure returns an error rather than 200 without the
+property: answering 200 with the option silently unhonoured would let a verifier
+believe it had checked signatures it never received.
+
+This is a method-specific RESOLUTION OPTION, carried as a query parameter per
+DID Resolution 1.0 §12.1, and a method-specific METADATA PROPERTY. Both SHOULD
+be registered in the DID Resolution Extensions registry.
+
+It is deliberately NOT content negotiation. §12.1 maps `Accept` to "the media
+type of the caller's preferred representation of the DID document", and a
+closure is not a representation of the document -- it is the evidence the
+document is derived from. Negotiating it as a content type would misuse the
+mechanism and fork `GET /{did}` into two incompatible bodies; as metadata, one
+canonical URL serves every consumer.
+
 Response 404: DID not found in local state
 Response 410: DID deactivated
 
@@ -1592,6 +1722,52 @@ Verified by:
 
 ---
 
+```
+CON-007: alsoKnownAs URI Set — Recogniser
+
+/// Recognise an alsoKnownAs URI set before any of it is applied.
+fn validate::recognise_also_known_as(uris: &[String]) -> Result<()>
+
+Grammar (ABNF), deliberately narrower than RFC 3986:
+
+  set     = 0*32( uri )                     ; distinct, each 1..=512 bytes
+  uri     = scheme ":" 1*( %x21-7E )        ; no space, no control characters
+  scheme  = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+
+Pre-conditions:
+- None. This is a total recogniser over arbitrary input, and is the trust
+  boundary for this field.
+
+Post-conditions:
+- Ok(()) implies every entry is an absolute URI of printable ASCII, the set is
+  within its cardinality bound, and no entry exceeds its length bound.
+- Err implies NO part of the delta has been applied. Recognition happens in
+  Document::merge before apply_op, so a set containing one bad entry rejects
+  the whole delta rather than admitting the good entries.
+
+Error model:
+- DeltaRejected: cardinality bound exceeded, entry length outside 1..=512,
+  missing or malformed scheme, or an empty / non-printable body.
+
+Why narrower than RFC 3986. These strings are republished by verifiers into
+documents consumed by software this project does not control. The recogniser
+therefore fails closed: it admits the absolute-URI forms the binding actually
+uses (acct:, https:, did:) and refuses anything it cannot classify, rather than
+accepting whatever a permissive parser happens to tolerate. Widening the
+grammar later is a compatible change; narrowing it would not be.
+
+Rejecting relative references is the substantive restriction. An alias is a
+claim about an identity somewhere else, and a relative reference has no meaning
+without a base the document does not carry.
+
+The bounds are bounds, not considered maxima: the set is replicated to every
+peer holding the DID, so an unbounded list is a cheap way to make other people
+store data.
+
+Implements:
+- REQ-015
+```
+
 ## 11. Test Specifications
 
 ### Property-Based Tests (Pure Core)
@@ -1972,6 +2148,177 @@ CON-006 §admission control
 
 ---
 
+```
+TEST-025: Reserved documentData Keys Refused at Admission (unit)
+
+Regression cover for BUG-001, admission direction.
+
+1. Create a document and, for EVERY name in the reserved DID Core property set,
+   submit a signed SetDocumentData delta using that name as its key.
+2. Assert: each is rejected as DeltaRejected, and none enters the delta log.
+
+Iterating the whole reserved set rather than a sample is deliberate: a name
+added to the set later without a matching guard would otherwise pass unnoticed.
+```
+
+```
+TEST-026: State-Borne Reserved Key Cannot Shadow id (unit)
+
+Regression cover for BUG-001, projection direction. Admission-time rejection is
+not sufficient on its own, because state-based merge unions documentData
+wholesale without passing through delta admission.
+
+1. Create a document, then insert a documentData entry named `id` DIRECTLY into
+   state, modelling what arrives from a peer running pre-fix code.
+2. Resolve, serialise, and re-parse the document.
+3. Assert: the parsed id is the document's real DID, and exactly one top-level
+   id member was emitted.
+
+The assertion is made after a serialise/parse round trip on purpose. The defect
+does not exist in the struct -- it exists only once the document is written out,
+and it is the consumer's parse that decides which member wins.
+```
+
+```
+TEST-027: Injected verificationMethod Cannot Outlive Its Revoked Key (unit)
+
+Regression cover for BUG-001's most serious consequence: authentication
+material persisting past revocation of the key that introduced it.
+
+1. Create a document with genesis key K0; add a second key K1.
+2. K1 submits a SetDocumentData delta setting `verificationMethod` to an array
+   containing an attacker-chosen method.
+3. Assert: the delta is rejected.
+4. Revoke K1, and assert the revocation took effect.
+5. Resolve, serialise, re-parse.
+6. Assert: verificationMethod contains exactly the genuine K0 entry, and no
+   injected entry.
+
+Step 3 is the fix; steps 4-6 assert the property the fix protects. Before the
+fix, step 2 succeeded and step 6 saw ONLY the injected array.
+```
+
+```
+TEST-028: alsoKnownAs Recogniser (unit)
+
+Covers CON-007 in both directions.
+
+Refusal — each of these is submitted as a single-entry set and MUST be
+rejected, with the document's alias set left empty:
+1. empty string
+2. `hugo@chat.anuna.io` (a bare handle — no scheme)
+3. `/relative/path` (relative reference)
+4. `1nvalid:x` (scheme does not start with a letter)
+5. `acct:` (empty body)
+6. `acct:hugo chat` (space)
+7. `acct:hugo<DEL>x` and `acct:hugo<LF>x` (non-printable)
+
+Whole-delta refusal:
+8. `["acct:ok@x.io", "no-scheme"]` — rejected entirely; the well-formed entry
+   MUST NOT be admitted on its own.
+
+Bounds:
+9. A set of MAX_ALSO_KNOWN_AS + 1 entries is rejected.
+10. A single entry longer than MAX_ALSO_KNOWN_AS_URI_LEN is rejected.
+
+Acceptance — the forms the binding actually uses MUST pass, or the refusal
+cases above prove only that everything is rejected:
+11. `acct:hugo@chat.anuna.io`, `https://chat.anuna.io/u/hugo`, `did:crdt:...`
+```
+
+```
+TEST-029: alsoKnownAs LWW Semantics (unit)
+
+Covers the register behaviour REQ-015 requires, including the property that
+motivated choosing a register over a 2P-Set.
+
+Scenario A — withdrawal and reinstatement:
+1. Set alias A at t=10; assert present.
+2. Set the empty set at t=20; assert withdrawn.
+3. Set alias A again at t=30; assert present.
+
+Step 3 is the one a 2P-Set could not satisfy.
+
+Scenario B — a stale write must not resurrect a withdrawal:
+1. Set alias A at t=20, then the empty set at t=30.
+2. Deliver a Set of [A] stamped t=10 (out-of-order arrival).
+3. Assert: the alias set is still empty.
+
+LWW is only safe here if a delta that merely arrived later, but is stamped
+earlier, loses. A withdrawal that could be undone by out-of-order delivery
+would make withdrawal unreliable, and withdrawal is the half of the binding
+that carries the security weight.
+```
+
+```
+TEST-030: alsoKnownAs Projection and Convergence (unit)
+
+1. Typed projection: after setting one alias, the resolved document's
+   alsoKnownAs equals it, the serialised JSON contains EXACTLY ONE alsoKnownAs
+   member, and re-parsing yields the alias. (The single-member assertion is the
+   regression guard against BUG-001's duplicate-member failure, which is how
+   this property behaved before it was typed.)
+2. Empty is absent: with no aliases set, the serialised document has no
+   alsoKnownAs member at all, rather than an empty array.
+3. Canonicalisation: two replicas that write the same aliases in different
+   orders, one with a duplicate entry, reach an identical alias set AND an
+   identical content_hash.
+4. versionId moves: setting an alias changes the resolved
+   didDocumentMetadata.versionId. Without this the alias set would be outside
+   observable state and a consumer caching on versionId would never observe a
+   withdrawal.
+```
+
+```
+TEST-031: Closure Bundle Replays to the Served State (unit)
+
+The property that makes REQ-016 worth anything: a verifier who takes ONLY the
+bundle, and trusts none of the projection, reaches the state the resolver would
+have served.
+
+1. Build a document with a genesis and at least one further SIGNED delta.
+   Unsigned deltas cannot be used: verify_signature permits an empty proof only
+   at genesis, which is precisely the property a replay-based verifier relies
+   on.
+2. Extract the closure bundle. Assert the target is present in its own bundle
+   (a bundle whose target is absent is refused on replay).
+3. Replay as the consuming verifier does: find the parentless genesis delta,
+   bootstrap a fresh replica from its root key -- which recomputes the
+   self-certifying DID -- assert the derived DID equals the one asked about,
+   then merge_verified_bundle.
+4. Assert the replayed content_hash equals the original's.
+
+Scenario B — concurrent heads:
+5. Build two deltas both parented on genesis, so the frontier holds two heads.
+6. Assert the bundle carries genesis plus BOTH branches, and that it replays to
+   the same content hash.
+
+Step 6 is the case a single extract_closure(target) gets wrong: the target's
+ancestry alone omits the other branch.
+
+Scenario C — determinism:
+7. Two replicas built to the same state MUST return the same target.
+```
+
+```
+TEST-032: includeClosure at the HTTP Surface (integration)
+
+The option is the contract a verifier codes against, so it is pinned at the
+HTTP boundary and not only in the core.
+
+1. Create a DID over HTTP.
+2. GET /{did} with no option: assert didDocumentMetadata has NO signedClosure
+   member -- absent, not null.
+3. GET /{did}?includeClosure=true: assert signedClosure is present and names a
+   target with a non-empty deltas array.
+4. Deserialise it as a ClosureBundle, bootstrap from its genesis root key,
+   assert the derived DID equals the one served, and merge_verified_bundle.
+
+Step 4 is the substantive assertion. A bundle that deserialises but does not
+reconstruct the DID is worth nothing to a verifier, and only replaying it
+proves the difference.
+```
+
 ## 12. Purity Boundary Map
 
 ### Pure Core (no I/O, no shared state, deterministic)
@@ -2103,12 +2450,14 @@ REQ-005 (Key Rotation)         → TEST-006, TEST-007 → crdt.rs          → O
 REQ-006 (Revocation)           → TEST-008          → crdt.rs          → OBS-003
 REQ-007 (Deactivation)         → TEST-009          → crdt.rs          → OBS-004 (deactivated_did)
 REQ-008 (HLC)                  → TEST-010          → hlc.rs           → (no OBS — internal)
-REQ-009 (W3C Resolution)       → TEST-011          → resolve.rs       → OBS-002
+REQ-009 (W3C Resolution)       → TEST-011, TEST-025, TEST-026, TEST-027 → resolve.rs, document.rs → OBS-002, OBS-004
 REQ-010 (Content-Addressed)    → TEST-012          → document.rs, store.rs → OBS-006
 REQ-011 (Library API)          → TEST-013          → lib.rs           → (no OBS — compile-time)
 REQ-012 (Service Mode)         → TEST-014          → service.rs       → OBS-002, OBS-005
 REQ-013 (DHT Registration)     → TEST-022          → sync/dht.rs      → OBS-005
 REQ-014 (Cold-Start Resolution)→ TEST-023          → sync/dht.rs, sync/live.rs → OBS-005
+REQ-015 (alsoKnownAs)          → TEST-028, TEST-029, TEST-030 → crdt.rs, validate.rs, document.rs → OBS-004
+REQ-016 (Signed Closure)       → TEST-031, TEST-032 → document.rs, recon.rs, service/handlers.rs → OBS-002
 
 NFR-001 (Convergence Latency)  → TEST-015          → sync.rs          → OBS-001
 NFR-002 (Offline Tolerance)    → TEST-016          → document.rs      → OBS-001
@@ -2143,6 +2492,7 @@ CON-006 (DHT Discovery)        → TEST-022, TEST-023, TEST-024
 | State bloat (attacker grows document unboundedly) | State size monitoring (OBS-006). Future: compaction policy, field count limits. | OBS-006 |
 | Partition attack (isolate node, feed stale state) | CRDT merge is correct under arbitrary partitions. Peer count monitoring alerts on isolation. | TEST-016, OBS-005 |
 | Clock manipulation (push HLC into far future) | HLC rejects physical timestamps > wall_clock + max_drift. Configurable drift threshold. | TEST-010 |
+| Property shadowing via documentData (authorised key injects a duplicate DID Core member, so a last-wins parser reads the injected value) | Reserved DID Core property names refused at delta admission AND skipped at projection. Both are required: state-based merge unions documentData without passing admission. Note this defeated key revocation, since an injected verificationMethod does not live in the 2P-Set that revocation acts on. | BUG-001, TEST-025, TEST-026, TEST-027 |
 
 ### Cryptographic Requirements
 
@@ -2397,6 +2747,94 @@ in `docs/adr/`. The remaining questions are tracked for future work.
 - [x] Address open questions (compaction, key recovery, sybil resistance, state size limits) — see ADR-001 through ADR-004 in docs/adr/
 
 **Quality gates:** Zero fuzzing crashes. Security review passed. WASM compiles.
+
+
+---
+
+## 20. Defects
+
+```
+BUG-001: documentData Could Shadow Any DID Core Property
+
+Severity: high -- document integrity, and it defeats key revocation.
+Status:   fixed 2026-08-13. Never deployed; no live exposure.
+
+SYMPTOM
+
+A resolved DID document could contain two members of the same name. A
+consumer's answer to "what is this document's id" or "which keys authenticate
+it" then depended on which member its JSON parser kept.
+
+MECHANISM
+
+DidDocument.extra is serialised with serde's flatten, and the documentData
+LWW-Map was projected into it unfiltered. serde does not deduplicate across a
+flatten boundary, so a documentData entry whose key names a DID Core property
+emits a SECOND member of that name beside the typed field. serde_json retains
+the last, which is the injected one.
+
+EVIDENCE
+
+Setting documentData["id"] on an otherwise ordinary document produced:
+
+  "id":"did:crdt:a9baa8e5...", ..., "id":"did:crdt:ATTACKER"
+  re-parsed id -> "did:crdt:ATTACKER"
+
+IMPACT
+
+1. Revocation bypass. A key may write a shadow verificationMethod array into
+   documentData and then be revoked. Revocation acts on the 2P-Set; the
+   injected value does not live there, so it outlives the key that wrote it and
+   a last-wins parser sees only the injected array. Ending what a key can
+   assert is the entire purpose of revoking it.
+
+2. Identifier restatement. A holder could make their own document claim to be a
+   different DID -- the binding a verifier checks by recomputing the identifier
+   from the genesis public key.
+
+3. Every other DID Core property is equally shadowable, including
+   authentication, assertionMethod, controller and service.
+
+Submitting the delta requires an authorised key, so this is not reachable
+anonymously. It remains a privilege-persistence defect rather than a cosmetic
+one, for the reason in (1).
+
+It violates REQ-009 on both of that requirement's explicit terms: the resolved
+document's id no longer matched the DID, and an object carrying duplicate
+members does not validate against the DID Core JSON-LD schema. It is
+additionally a LangSec violation -- a trust-boundary projection emitting a
+document whose meaning is settled by the recipient's parser rather than by its
+producer.
+
+ROOT CAUSE
+
+An untyped escape hatch -- documentData accepts any JSON value under any key --
+was projected into a typed namespace, the DID document, with no reserved-name
+discipline at the join.
+
+RESOLUTION
+
+A reserved set of DID Core property names, enforced in BOTH directions:
+
+- Document::merge refuses a SetDocumentData naming a reserved property, so it
+  never enters the delta log.
+- The projection skips reserved keys however they arrived.
+
+Both are necessary. State-based merge unions documentData wholesale without
+passing delta admission, so a peer on older code -- or a hostile one -- can
+seat a reserved key directly into state; admission-time rejection alone leaves
+that path open.
+
+alsoKnownAs is reserved by this fix. It is a DID Core property and therefore
+requires a typed field rather than an untyped passthrough -- delivered as
+REQ-015 / CON-007, which is why the reservation does not remove a capability.
+
+Trace:
+- REQ-009
+- TEST-025
+- TEST-026
+- TEST-027
+```
 
 ---
 

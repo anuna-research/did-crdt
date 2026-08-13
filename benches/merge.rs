@@ -18,7 +18,7 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use did_crdt::{
     core::{
-        delta::{DeltaOp, SignedDelta, SuiteType, default_relationships},
+        delta::{default_relationships, DeltaOp, SignedDelta, SuiteType},
         hlc::HlcTimestamp,
     },
     Document,
@@ -27,11 +27,7 @@ use did_crdt::{
 // ── size buckets ──────────────────────────────────────────────────────────────
 
 /// (label, vm_count, svc_count) — matching OBS-002 bucket definitions.
-const SIZES: &[(&str, usize, usize)] = &[
-    ("small",  1,   1),
-    ("medium", 10,  10),
-    ("large",  100, 100),
-];
+const SIZES: &[(&str, usize, usize)] = &[("small", 1, 1), ("medium", 10, 10), ("large", 100, 100)];
 
 // ── fixture builder ───────────────────────────────────────────────────────────
 
@@ -48,7 +44,11 @@ fn build_doc(vm_count: usize, svc_count: usize) -> (Document, String) {
 
     // Add extra verification methods (VM 1 … vm_count-1).
     for i in 1..vm_count {
-        let ts = HlcTimestamp { wall_ms: i as u64 * 10, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: i as u64 * 10,
+            logical: 0,
+            node_id: 1,
+        };
         let op = DeltaOp::AddVerificationMethod {
             id: format!("{}#key-{}", doc.did, i),
             public_key_multibase: format!("zBenchKey{}", i),
@@ -57,12 +57,17 @@ fn build_doc(vm_count: usize, svc_count: usize) -> (Document, String) {
         };
         let mut d = SignedDelta::unsigned(doc.did.clone(), op, ts, signer.clone());
         d.parents = doc.frontier();
-        doc.merge(d).expect("merge VM must succeed during fixture build");
+        doc.merge(d)
+            .expect("merge VM must succeed during fixture build");
     }
 
     // Add service endpoints (svc-0 … svc-(svc_count-1)).
     for i in 0..svc_count {
-        let ts = HlcTimestamp { wall_ms: 10_000 + i as u64 * 10, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 10_000 + i as u64 * 10,
+            logical: 0,
+            node_id: 1,
+        };
         let op = DeltaOp::AddServiceEndpoint {
             id: format!("{}#svc-{}", doc.did, i),
             service_type: "LinkedDomains".to_owned(),
@@ -70,14 +75,19 @@ fn build_doc(vm_count: usize, svc_count: usize) -> (Document, String) {
         };
         let mut d = SignedDelta::unsigned(doc.did.clone(), op, ts, signer.clone());
         d.parents = doc.frontier();
-        doc.merge(d).expect("merge service must succeed during fixture build");
+        doc.merge(d)
+            .expect("merge service must succeed during fixture build");
     }
 
     (doc, signer)
 }
 
 /// A timestamp far beyond any fixture timestamp, ensuring it is causally later.
-const BENCH_TS: HlcTimestamp = HlcTimestamp { wall_ms: 1_000_000, logical: 0, node_id: 99 };
+const BENCH_TS: HlcTimestamp = HlcTimestamp {
+    wall_ms: 1_000_000,
+    logical: 0,
+    node_id: 99,
+};
 
 // ── merge benchmarks ──────────────────────────────────────────────────────────
 
@@ -97,13 +107,17 @@ fn bench_merge_add_verification_method(c: &mut Criterion) {
         let mut delta = SignedDelta::unsigned(doc.did.clone(), op, BENCH_TS, signer);
         delta.parents = doc.frontier();
 
-        group.bench_with_input(BenchmarkId::new("size", label), &(doc, delta), |b, (d, delta)| {
-            b.iter_batched(
-                || (d.clone(), delta.clone()),
-                |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("size", label),
+            &(doc, delta),
+            |b, (d, delta)| {
+                b.iter_batched(
+                    || (d.clone(), delta.clone()),
+                    |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -122,13 +136,17 @@ fn bench_merge_add_service_endpoint(c: &mut Criterion) {
         let mut delta = SignedDelta::unsigned(doc.did.clone(), op, BENCH_TS, signer);
         delta.parents = doc.frontier();
 
-        group.bench_with_input(BenchmarkId::new("size", label), &(doc, delta), |b, (d, delta)| {
-            b.iter_batched(
-                || (d.clone(), delta.clone()),
-                |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("size", label),
+            &(doc, delta),
+            |b, (d, delta)| {
+                b.iter_batched(
+                    || (d.clone(), delta.clone()),
+                    |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -146,13 +164,17 @@ fn bench_merge_remove_service_endpoint(c: &mut Criterion) {
         let mut delta = SignedDelta::unsigned(doc.did.clone(), op, BENCH_TS, signer);
         delta.parents = doc.frontier();
 
-        group.bench_with_input(BenchmarkId::new("size", label), &(doc, delta), |b, (d, delta)| {
-            b.iter_batched(
-                || (d.clone(), delta.clone()),
-                |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("size", label),
+            &(doc, delta),
+            |b, (d, delta)| {
+                b.iter_batched(
+                    || (d.clone(), delta.clone()),
+                    |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -170,13 +192,17 @@ fn bench_merge_set_document_data(c: &mut Criterion) {
         let mut delta = SignedDelta::unsigned(doc.did.clone(), op, BENCH_TS, signer);
         delta.parents = doc.frontier();
 
-        group.bench_with_input(BenchmarkId::new("size", label), &(doc, delta), |b, (d, delta)| {
-            b.iter_batched(
-                || (d.clone(), delta.clone()),
-                |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("size", label),
+            &(doc, delta),
+            |b, (d, delta)| {
+                b.iter_batched(
+                    || (d.clone(), delta.clone()),
+                    |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -194,13 +220,17 @@ fn bench_merge_rotate_key(c: &mut Criterion) {
         let mut delta = SignedDelta::unsigned(doc.did.clone(), op, BENCH_TS, signer);
         delta.parents = doc.frontier();
 
-        group.bench_with_input(BenchmarkId::new("size", label), &(doc, delta), |b, (d, delta)| {
-            b.iter_batched(
-                || (d.clone(), delta.clone()),
-                |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("size", label),
+            &(doc, delta),
+            |b, (d, delta)| {
+                b.iter_batched(
+                    || (d.clone(), delta.clone()),
+                    |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -217,13 +247,17 @@ fn bench_merge_revoke_credential(c: &mut Criterion) {
         let mut delta = SignedDelta::unsigned(doc.did.clone(), op, BENCH_TS, signer);
         delta.parents = doc.frontier();
 
-        group.bench_with_input(BenchmarkId::new("size", label), &(doc, delta), |b, (d, delta)| {
-            b.iter_batched(
-                || (d.clone(), delta.clone()),
-                |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("size", label),
+            &(doc, delta),
+            |b, (d, delta)| {
+                b.iter_batched(
+                    || (d.clone(), delta.clone()),
+                    |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -244,13 +278,17 @@ fn bench_merge_revoke_verification_method(c: &mut Criterion) {
         let mut delta = SignedDelta::unsigned(doc.did.clone(), op, BENCH_TS, signer);
         delta.parents = doc.frontier();
 
-        group.bench_with_input(BenchmarkId::new("size", label), &(doc, delta), |b, (d, delta)| {
-            b.iter_batched(
-                || (d.clone(), delta.clone()),
-                |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("size", label),
+            &(doc, delta),
+            |b, (d, delta)| {
+                b.iter_batched(
+                    || (d.clone(), delta.clone()),
+                    |(mut doc, delta)| doc.merge(delta).expect("merge must succeed"),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }

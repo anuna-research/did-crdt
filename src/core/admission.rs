@@ -217,7 +217,11 @@ mod tests {
     fn meet_invalid_is_commutative_across_distinct_reasons() {
         let a = AdmissionResult::Invalid(RejectReason::Revoked);
         let b = AdmissionResult::Invalid(RejectReason::Deactivated);
-        assert_eq!(a.clone().meet(b.clone()), b.meet(a), "meet must not depend on order");
+        assert_eq!(
+            a.clone().meet(b.clone()),
+            b.meet(a),
+            "meet must not depend on order"
+        );
     }
 
     // ── lattice laws: meet ──────────────────────────────────────────────────
@@ -302,7 +306,10 @@ mod tests {
         assert!(AdmissionResult::Valid.is_resolved());
         assert!(AdmissionResult::Invalid(RejectReason::TooLarge).is_resolved());
         // missing() exposes the fetch list only for Unknown.
-        assert_eq!(AdmissionResult::Unknown(vec![h("aa")]).missing(), &[h("aa")]);
+        assert_eq!(
+            AdmissionResult::Unknown(vec![h("aa")]).missing(),
+            &[h("aa")]
+        );
         assert!(AdmissionResult::Valid.missing().is_empty());
         for a in reps() {
             assert_eq!(a.is_resolved(), a.is_stable());

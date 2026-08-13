@@ -227,8 +227,11 @@ impl DhtNode {
         // authenticates the NodeId, so a forged hint only wastes a connection
         // attempt. Strings must outlive `txt` (borrowed, not owned by TXT).
         let nid_string = format!("nid={node_id}");
-        let relay_string: Option<String> =
-            node_addr.info.relay_url.as_ref().map(|u| format!("relay={u}"));
+        let relay_string: Option<String> = node_addr
+            .info
+            .relay_url
+            .as_ref()
+            .map(|u| format!("relay={u}"));
         let addrs_string: Option<String> = if node_addr.info.direct_addresses.is_empty() {
             None
         } else {
@@ -331,7 +334,10 @@ impl DhtNode {
                                 .unwrap_or_default();
                             NodeAddr {
                                 node_id,
-                                info: iroh::net::AddrInfo { relay_url, direct_addresses },
+                                info: iroh::net::AddrInfo {
+                                    relay_url,
+                                    direct_addresses,
+                                },
                             }
                         };
                         addrs.push(addr);
@@ -393,8 +399,10 @@ mod tests {
         use base64ct::{Base64UrlUnpadded, Encoding as _};
         use ed25519_dalek::SigningKey;
         let dk = SigningKey::from_bytes(&[42u8; 32]);
-        let pk_mb =
-            format!("u{}", Base64UrlUnpadded::encode_string(dk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(dk.verifying_key().as_bytes())
+        );
         let (doc, _) = Document::new(&pk_mb).expect("new() must succeed");
         let did = doc.did.clone();
         (doc, did)
@@ -423,14 +431,22 @@ mod tests {
         let node_id = sk.public();
         let node_addr = iroh::net::NodeAddr {
             node_id,
-            info: iroh::net::AddrInfo { relay_url: None, direct_addresses: Default::default() },
+            info: iroh::net::AddrInfo {
+                relay_url: None,
+                direct_addresses: Default::default(),
+            },
         };
 
-        dht.publish(&did, &node_addr).await.expect("publish must succeed");
+        dht.publish(&did, &node_addr)
+            .await
+            .expect("publish must succeed");
 
         let addrs = dht.lookup(&did).await.expect("lookup must succeed");
         assert!(!addrs.is_empty(), "lookup should return at least one addr");
-        assert_eq!(addrs[0].node_id, node_id, "returned NodeId must match the publishing node");
+        assert_eq!(
+            addrs[0].node_id, node_id,
+            "returned NodeId must match the publishing node"
+        );
     }
 
     #[tokio::test]
@@ -449,7 +465,10 @@ mod tests {
         let node_id = sk.public();
         let node_addr = iroh::net::NodeAddr {
             node_id,
-            info: iroh::net::AddrInfo { relay_url: None, direct_addresses: Default::default() },
+            info: iroh::net::AddrInfo {
+                relay_url: None,
+                direct_addresses: Default::default(),
+            },
         };
 
         dht.publish(&did, &node_addr).await.unwrap();
@@ -463,8 +482,15 @@ mod tests {
         assert!(!records.is_empty());
         if let RData::TXT(ref txt) = records[0].rdata {
             let attrs = txt.attributes();
-            assert_eq!(attrs.get("v").and_then(|v| v.as_deref()), Some("1"), "v must be 1");
-            let nid_str = attrs.get("nid").and_then(|v| v.as_deref()).expect("nid must be present");
+            assert_eq!(
+                attrs.get("v").and_then(|v| v.as_deref()),
+                Some("1"),
+                "v must be 1"
+            );
+            let nid_str = attrs
+                .get("nid")
+                .and_then(|v| v.as_deref())
+                .expect("nid must be present");
             let parsed: NodeId = nid_str.parse().expect("nid must be a valid NodeId");
             assert_eq!(parsed, node_id);
         } else {
@@ -492,10 +518,12 @@ mod tests {
         let node_id = sk.public();
         let relay_url: iroh::net::relay::RelayUrl =
             "https://relay.example".parse().expect("valid relay url");
-        let direct: std::collections::BTreeSet<std::net::SocketAddr> =
-            ["10.0.0.1:4433".parse().unwrap(), "[2001:db8::1]:4433".parse().unwrap()]
-                .into_iter()
-                .collect();
+        let direct: std::collections::BTreeSet<std::net::SocketAddr> = [
+            "10.0.0.1:4433".parse().unwrap(),
+            "[2001:db8::1]:4433".parse().unwrap(),
+        ]
+        .into_iter()
+        .collect();
         let node_addr = iroh::net::NodeAddr {
             node_id,
             info: iroh::net::AddrInfo {
@@ -504,7 +532,9 @@ mod tests {
             },
         };
 
-        dht.publish(&did, &node_addr).await.expect("publish must succeed");
+        dht.publish(&did, &node_addr)
+            .await
+            .expect("publish must succeed");
         let addrs = dht.lookup(&did).await.expect("lookup must succeed");
 
         assert_eq!(addrs.len(), 1);
@@ -538,7 +568,10 @@ mod tests {
             },
         };
 
-        assert!(dht.publish(&did, &mk_addr(1111)).await.unwrap(), "first publish goes out");
+        assert!(
+            dht.publish(&did, &mk_addr(1111)).await.unwrap(),
+            "first publish goes out"
+        );
         assert!(
             !dht.publish(&did, &mk_addr(1111)).await.unwrap(),
             "unchanged repeat within the window is deduplicated"
@@ -557,11 +590,19 @@ mod tests {
         let dk = DalekKey::from_bytes(&[42u8; 32]);
         let sk = SigningKey::Ed25519(dk);
         let signer = doc.verification_methods.entries()[0].id.clone();
-        let genesis_hash = doc.export_bundle().unwrap().deltas[0].content_hash().unwrap();
+        let genesis_hash = doc.export_bundle().unwrap().deltas[0]
+            .content_hash()
+            .unwrap();
         crate::core::delta::SignedDelta::new_with_parents(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-1".to_owned() },
-            crate::core::hlc::HlcTimestamp { wall_ms: 100, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-1".to_owned(),
+            },
+            crate::core::hlc::HlcTimestamp {
+                wall_ms: 100,
+                logical: 0,
+                node_id: 1,
+            },
             vec![genesis_hash],
             signer,
             &sk,
@@ -578,7 +619,10 @@ mod tests {
         let mut docs = std::collections::HashMap::new();
 
         let result = genesis_bootstrap(&mut docs, &did, vec![delta]);
-        assert!(matches!(result, Err(BootstrapError::PartialHistory)), "{result:?}");
+        assert!(
+            matches!(result, Err(BootstrapError::PartialHistory)),
+            "{result:?}"
+        );
         assert!(docs.is_empty(), "DocStore must remain unchanged on failure");
     }
 
@@ -597,7 +641,10 @@ mod tests {
 
         // Create a second "genesis": AddVerificationMethod with a different key
         let dk2 = DalekKey::from_bytes(&[99u8; 32]);
-        let pk2 = format!("u{}", Base64UrlUnpadded::encode_string(dk2.verifying_key().as_bytes()));
+        let pk2 = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(dk2.verifying_key().as_bytes())
+        );
         let sk2 = SigningKey::Ed25519(dk2);
         let genesis2 = SignedDelta::new_with_parents(
             did.clone(),
@@ -607,7 +654,11 @@ mod tests {
                 suite_type: Default::default(),
                 relationships: crate::core::delta::default_relationships(),
             },
-            crate::core::hlc::HlcTimestamp { wall_ms: 1, logical: 0, node_id: 2 },
+            crate::core::hlc::HlcTimestamp {
+                wall_ms: 1,
+                logical: 0,
+                node_id: 2,
+            },
             vec![], // empty parents — second "genesis"
             format!("{did}#key-99"),
             &sk2,
@@ -616,7 +667,10 @@ mod tests {
 
         let mut docs = std::collections::HashMap::new();
         let result = genesis_bootstrap(&mut docs, &did, vec![genesis1, genesis2]);
-        assert!(matches!(result, Err(BootstrapError::BootstrapFailed(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(BootstrapError::BootstrapFailed(_))),
+            "{result:?}"
+        );
         assert!(docs.is_empty());
     }
 
@@ -632,7 +686,10 @@ mod tests {
 
         // Build a genesis-like delta for `did` but with an unrelated key.
         let dk2 = DalekKey::from_bytes(&[77u8; 32]);
-        let pk2 = format!("u{}", Base64UrlUnpadded::encode_string(dk2.verifying_key().as_bytes()));
+        let pk2 = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(dk2.verifying_key().as_bytes())
+        );
         let sk2 = SigningKey::Ed25519(dk2);
         let fake_genesis = SignedDelta::new_with_parents(
             did.clone(),
@@ -642,7 +699,11 @@ mod tests {
                 suite_type: Default::default(),
                 relationships: crate::core::delta::default_relationships(),
             },
-            crate::core::hlc::HlcTimestamp { wall_ms: 0, logical: 0, node_id: 0 },
+            crate::core::hlc::HlcTimestamp {
+                wall_ms: 0,
+                logical: 0,
+                node_id: 0,
+            },
             vec![], // empty parents
             format!("{did}#key-0"),
             &sk2,
@@ -651,7 +712,10 @@ mod tests {
 
         let mut docs = std::collections::HashMap::new();
         let result = genesis_bootstrap(&mut docs, &did, vec![fake_genesis]);
-        assert!(matches!(result, Err(BootstrapError::BootstrapFailed(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(BootstrapError::BootstrapFailed(_))),
+            "{result:?}"
+        );
         assert!(docs.is_empty());
     }
 
@@ -672,8 +736,10 @@ mod tests {
 
         // Same key as make_doc, so check (a) (DID ← key) passes…
         let dk = DalekKey::from_bytes(&[42u8; 32]);
-        let pk_mb =
-            format!("u{}", Base64UrlUnpadded::encode_string(dk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(dk.verifying_key().as_bytes())
+        );
         let sk = SigningKey::Ed25519(dk);
         // …but the timestamp is not the canonical all-zero genesis timestamp,
         // so the received genesis hash differs from the reconstructed one.
@@ -685,7 +751,11 @@ mod tests {
                 suite_type: Default::default(),
                 relationships: crate::core::delta::default_relationships(),
             },
-            crate::core::hlc::HlcTimestamp { wall_ms: 5, logical: 0, node_id: 0 },
+            crate::core::hlc::HlcTimestamp {
+                wall_ms: 5,
+                logical: 0,
+                node_id: 0,
+            },
             vec![], // empty parents — claims to be genesis
             format!("{did}#key-0"),
             &sk,
@@ -694,7 +764,10 @@ mod tests {
 
         let mut docs = std::collections::HashMap::new();
         let result = genesis_bootstrap(&mut docs, &did, vec![tampered]);
-        assert!(matches!(result, Err(BootstrapError::BootstrapFailed(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(BootstrapError::BootstrapFailed(_))),
+            "{result:?}"
+        );
         assert!(docs.is_empty(), "DocStore must remain unchanged on failure");
     }
 
@@ -712,7 +785,11 @@ mod tests {
         let bad_genesis = SignedDelta::new_with_parents(
             did.clone(),
             DeltaOp::Deactivate, // wrong op type for genesis
-            crate::core::hlc::HlcTimestamp { wall_ms: 0, logical: 0, node_id: 0 },
+            crate::core::hlc::HlcTimestamp {
+                wall_ms: 0,
+                logical: 0,
+                node_id: 0,
+            },
             vec![], // empty parents
             format!("{did}#key-0"),
             &sk,
@@ -721,7 +798,10 @@ mod tests {
 
         let mut docs = std::collections::HashMap::new();
         let result = genesis_bootstrap(&mut docs, &did, vec![bad_genesis]);
-        assert!(matches!(result, Err(BootstrapError::BootstrapFailed(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(BootstrapError::BootstrapFailed(_))),
+            "{result:?}"
+        );
         assert!(docs.is_empty());
     }
 }

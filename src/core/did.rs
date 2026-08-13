@@ -34,7 +34,9 @@ impl Did {
 
     /// Return the method-specific identifier (the 64-character hex portion).
     pub fn method_specific_id(&self) -> &str {
-        self.0.strip_prefix(PREFIX).expect("invariant: valid did:crdt prefix")
+        self.0
+            .strip_prefix(PREFIX)
+            .expect("invariant: valid did:crdt prefix")
     }
 
     /// Return the full DID string slice.
@@ -57,7 +59,9 @@ impl FromStr for Did {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let id = s.strip_prefix(PREFIX).ok_or_else(|| Error::InvalidDid(s.to_owned()))?;
+        let id = s
+            .strip_prefix(PREFIX)
+            .ok_or_else(|| Error::InvalidDid(s.to_owned()))?;
         if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::InvalidDid(s.to_owned()));
         }

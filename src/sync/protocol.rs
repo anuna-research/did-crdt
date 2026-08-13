@@ -98,7 +98,11 @@ mod tests {
     }
 
     fn sample_ts() -> HlcTimestamp {
-        HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 }
+        HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        }
     }
 
     fn roundtrip(msg: &SyncMessage) -> SyncMessage {
@@ -154,13 +158,19 @@ mod tests {
 
     #[test]
     fn request_tag_is_screaming_snake_case() {
-        let msg = SyncMessage::Request { did: sample_did(), frontier: vec![] };
+        let msg = SyncMessage::Request {
+            did: sample_did(),
+            frontier: vec![],
+        };
         assert_eq!(msg_tag(&msg), "REQUEST");
     }
 
     #[test]
     fn request_roundtrip_empty_frontier() {
-        let msg = SyncMessage::Request { did: sample_did(), frontier: vec![] };
+        let msg = SyncMessage::Request {
+            did: sample_did(),
+            frontier: vec![],
+        };
         assert_eq!(
             serde_json::to_string(&roundtrip(&msg)).unwrap(),
             serde_json::to_string(&msg).unwrap()
@@ -181,7 +191,10 @@ mod tests {
 
     #[test]
     fn request_empty_frontier_serialises_as_array() {
-        let msg = SyncMessage::Request { did: sample_did(), frontier: vec![] };
+        let msg = SyncMessage::Request {
+            did: sample_did(),
+            frontier: vec![],
+        };
         let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
         assert!(v["frontier"].as_array().is_some_and(|a| a.is_empty()));
     }
@@ -190,13 +203,19 @@ mod tests {
 
     #[test]
     fn deltas_tag_is_screaming_snake_case() {
-        let msg = SyncMessage::Deltas { did: sample_did(), deltas: vec![] };
+        let msg = SyncMessage::Deltas {
+            did: sample_did(),
+            deltas: vec![],
+        };
         assert_eq!(msg_tag(&msg), "DELTAS");
     }
 
     #[test]
     fn deltas_roundtrip_empty() {
-        let msg = SyncMessage::Deltas { did: sample_did(), deltas: vec![] };
+        let msg = SyncMessage::Deltas {
+            did: sample_did(),
+            deltas: vec![],
+        };
         assert_eq!(
             serde_json::to_string(&roundtrip(&msg)).unwrap(),
             serde_json::to_string(&msg).unwrap()
@@ -212,7 +231,10 @@ mod tests {
             sample_ts(),
             format!("{}#key-0", did),
         );
-        let msg = SyncMessage::Deltas { did: did.clone(), deltas: vec![delta] };
+        let msg = SyncMessage::Deltas {
+            did: did.clone(),
+            deltas: vec![delta],
+        };
         let rt = roundtrip(&msg);
         // Structural equality via re-serialisation (SignedDelta doesn't derive PartialEq).
         assert_eq!(
@@ -231,8 +253,14 @@ mod tests {
                 hash: [0u8; 32],
                 clock: sample_ts(),
             }),
-            msg_tag(&SyncMessage::Request { did: sample_did(), frontier: vec![] }),
-            msg_tag(&SyncMessage::Deltas { did: sample_did(), deltas: vec![] }),
+            msg_tag(&SyncMessage::Request {
+                did: sample_did(),
+                frontier: vec![],
+            }),
+            msg_tag(&SyncMessage::Deltas {
+                did: sample_did(),
+                deltas: vec![],
+            }),
         ];
         let unique: std::collections::HashSet<_> = messages.iter().collect();
         assert_eq!(unique.len(), 3, "each variant must have a unique tag");

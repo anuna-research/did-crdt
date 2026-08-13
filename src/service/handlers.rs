@@ -13,13 +13,19 @@
 use std::time::Instant;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::core::{delta::{SignedDelta, MAX_DELTA_SIZE}, did::Did, document::Document, resolve::ResolutionResult, validate, Error};
+use crate::core::{
+    delta::{SignedDelta, MAX_DELTA_SIZE},
+    did::Did,
+    document::Document,
+    resolve::ResolutionResult,
+    validate, Error,
+};
 
 use super::server::AppState;
 
@@ -85,7 +91,9 @@ pub async fn create_did(
     };
 
     let state_bytes = doc.to_bytes().map(|b| b.len() as i64).unwrap_or(0);
-    state.metrics.record_delta_accepted(&truncate_did(&did_str), state_bytes);
+    state
+        .metrics
+        .record_delta_accepted(&truncate_did(&did_str), state_bytes);
 
     state.docs.lock().insert(did.clone(), doc);
 
@@ -120,11 +128,41 @@ pub async fn create_did(
         });
     }
 
-    (StatusCode::CREATED, Json(CreateDidResponse { did: did_str, document: resolution_result }))
+    (
+        StatusCode::CREATED,
+        Json(CreateDidResponse {
+            did: did_str,
+            document: resolution_result,
+        }),
+    )
         .into_response()
 }
 
 // ── GET /:did ─────────────────────────────────────────────────────────────────
+
+/// Resolution options accepted on `GET /{did}`.
+///
+/// DID Resolution 1.0 §12.1 carries resolution options as query parameters, and
+/// method-specific options SHOULD be registered in the DID Resolution
+/// Extensions registry. `includeClosure` is one such option.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ResolutionQuery {
+    /// Return the signed deltas the document was materialised from.
+    ///
+    /// Defaults to false, and an absent or malformed value is false rather than
+    /// an error: an unrecognised resolution option is not a bad request, and a
+    /// caller that needs the closure detects its absence in the response.
+    #[serde(default, rename = "includeClosure", deserialize_with = "flag")]
+    pub include_closure: bool,
+}
+
+/// Accept only the two spellings a boolean query parameter has, and treat
+/// anything else as false. `?includeClosure` with no value reads as true, which
+/// is how a bare flag is normally spelled.
+fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(matches!(raw.as_deref(), Some("true") | Some("")))
+}
 
 /// Resolve a DID to a W3C DID document.
 ///
@@ -134,6 +172,7 @@ pub async fn create_did(
 pub async fn resolve_did(
     State(state): State<AppState>,
     Path(did_str): Path<String>,
+    Query(options): Query<ResolutionQuery>,
 ) -> Response {
     let start = Instant::now();
 
@@ -166,10 +205,24 @@ pub async fn resolve_did(
         let Some(doc) = guard.get(&did) else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        let result = match doc.resolve() {
+        let mut result = match doc.resolve() {
             Ok(r) => r,
             Err(err) => return core_error_response(err),
         };
+        // The `includeClosure` resolution option. A caller that will replay the
+        // deltas rather than trust the projection asks for them here; everyone
+        // else is not charged for the history.
+        //
+        // A failure to extract is a refusal, not a degraded success: answering
+        // 200 with the option silently unhonoured would let a verifier believe
+        // it had checked signatures it never received.
+        if options.include_closure {
+            match doc.closure_bundle() {
+                Ok(bundle) => result.did_document_metadata.signed_closure = Some(bundle),
+                Err(err) => return core_error_response(err),
+            }
+        }
+        let result = result;
         let elapsed = start.elapsed().as_secs_f64();
         let field_count = result
             .did_document
@@ -217,7 +270,10 @@ pub async fn submit_delta(
     }
 
     if delta.did.to_string() != did_str {
-        return (StatusCode::BAD_REQUEST, "DID in path does not match DID in delta")
+        return (
+            StatusCode::BAD_REQUEST,
+            "DID in path does not match DID in delta",
+        )
             .into_response();
     }
 
@@ -268,7 +324,9 @@ pub async fn submit_delta(
 
     match merge_result {
         Ok(()) => {
-            state.metrics.record_delta_accepted(&truncate_did(&did_str), state_bytes);
+            state
+                .metrics
+                .record_delta_accepted(&truncate_did(&did_str), state_bytes);
             // Announce the updated state to peers so they can reconcile (CON-004 step 4).
             #[cfg(feature = "sync")]
             if let Some(node) = &state.live_node {

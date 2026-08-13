@@ -8,7 +8,7 @@
 
 use did_crdt::{
     core::{
-        delta::{DeltaOp, SignedDelta, SuiteType, default_relationships},
+        delta::{default_relationships, DeltaOp, SignedDelta, SuiteType},
         hlc::HlcTimestamp,
     },
     Document,
@@ -21,7 +21,11 @@ fn build_doc(vm_count: usize, svc_count: usize) -> Document {
     let signer = format!("{}#key-0", doc.did);
 
     for i in 1..vm_count {
-        let ts = HlcTimestamp { wall_ms: i as u64 * 10, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: i as u64 * 10,
+            logical: 0,
+            node_id: 1,
+        };
         let op = DeltaOp::AddVerificationMethod {
             id: format!("{}#key-{}", doc.did, i),
             public_key_multibase: format!("zBenchKey{}", i),
@@ -34,7 +38,11 @@ fn build_doc(vm_count: usize, svc_count: usize) -> Document {
     }
 
     for i in 0..svc_count {
-        let ts = HlcTimestamp { wall_ms: 10_000 + i as u64 * 10, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 10_000 + i as u64 * 10,
+            logical: 0,
+            node_id: 1,
+        };
         let op = DeltaOp::AddServiceEndpoint {
             id: format!("{}#svc-{}", doc.did, i),
             service_type: "LinkedDomains".to_owned(),
@@ -122,8 +130,15 @@ fn estimate_deep_heap(doc: &Document, vm_count: usize, svc_count: usize) -> Heap
     let signed_delta_stack = 200; // approximate size_of::<SignedDelta>()
     let delta_log_spine = delta_count * signed_delta_stack;
 
-    let total_heap = did_heap + vm_heap + svc_heap + vclock_heap + data_heap
-        + active_key_heap + revocations_heap + delta_log_heap + delta_log_spine;
+    let total_heap = did_heap
+        + vm_heap
+        + svc_heap
+        + vclock_heap
+        + data_heap
+        + active_key_heap
+        + revocations_heap
+        + delta_log_heap
+        + delta_log_spine;
 
     HeapEstimate {
         did_heap,
@@ -158,18 +173,18 @@ struct HeapEstimate {
 
 #[test]
 fn measure_memory_footprint() {
-    let sizes: &[(&str, usize, usize)] = &[
-        ("small",   1,   1),
-        ("medium", 10,  10),
-        ("large", 100, 100),
-    ];
+    let sizes: &[(&str, usize, usize)] =
+        &[("small", 1, 1), ("medium", 10, 10), ("large", 100, 100)];
 
     let struct_size = std::mem::size_of::<Document>();
 
     println!("\n{:=<80}", "");
     println!("DID Document In-Memory Footprint Measurement");
     println!("{:=<80}", "");
-    println!("  size_of::<Document>() = {} bytes (stack frame)", struct_size);
+    println!(
+        "  size_of::<Document>() = {} bytes (stack frame)",
+        struct_size
+    );
 
     for &(label, vm_count, svc_count) in sizes {
         let doc = build_doc(vm_count, svc_count);
@@ -181,33 +196,79 @@ fn measure_memory_footprint() {
         let ser_bytes = doc.to_bytes().unwrap();
         let ser_len = ser_bytes.len();
 
-        println!("\n--- {} ({} VMs, {} services) ---", label, vm_count, svc_count);
-        println!("  Stack (size_of_val)                = {:>8} bytes", shallow);
-        println!("  Serialised (to_bytes)              = {:>8} bytes ({:.1} KiB)",
-            ser_len, ser_len as f64 / 1024.0);
+        println!(
+            "\n--- {} ({} VMs, {} services) ---",
+            label, vm_count, svc_count
+        );
+        println!(
+            "  Stack (size_of_val)                = {:>8} bytes",
+            shallow
+        );
+        println!(
+            "  Serialised (to_bytes)              = {:>8} bytes ({:.1} KiB)",
+            ser_len,
+            ser_len as f64 / 1024.0
+        );
         println!();
         println!("  Heap breakdown (estimated):");
-        println!("    DID string                       = {:>8} bytes", est.did_heap);
-        println!("    Verification methods ({:>3})       = {:>8} bytes", est.vm_count, est.vm_heap);
-        println!("    Service endpoints ({:>3})          = {:>8} bytes", est.svc_count, est.svc_heap);
-        println!("    Version-vector context           = {:>8} bytes", est.vclock_heap);
-        println!("    Document data                    = {:>8} bytes", est.data_heap);
-        println!("    Active key                       = {:>8} bytes", est.active_key_heap);
-        println!("    Revocations                      = {:>8} bytes", est.revocations_heap);
-        println!("    Delta log ({:>3} deltas)           = {:>8} bytes ({:.1} KiB)",
-            est.delta_count, est.delta_log_heap, est.delta_log_heap as f64 / 1024.0);
+        println!(
+            "    DID string                       = {:>8} bytes",
+            est.did_heap
+        );
+        println!(
+            "    Verification methods ({:>3})       = {:>8} bytes",
+            est.vm_count, est.vm_heap
+        );
+        println!(
+            "    Service endpoints ({:>3})          = {:>8} bytes",
+            est.svc_count, est.svc_heap
+        );
+        println!(
+            "    Version-vector context           = {:>8} bytes",
+            est.vclock_heap
+        );
+        println!(
+            "    Document data                    = {:>8} bytes",
+            est.data_heap
+        );
+        println!(
+            "    Active key                       = {:>8} bytes",
+            est.active_key_heap
+        );
+        println!(
+            "    Revocations                      = {:>8} bytes",
+            est.revocations_heap
+        );
+        println!(
+            "    Delta log ({:>3} deltas)           = {:>8} bytes ({:.1} KiB)",
+            est.delta_count,
+            est.delta_log_heap,
+            est.delta_log_heap as f64 / 1024.0
+        );
         println!("    ────────────────────────────────────────────");
-        println!("    Total estimated heap              = {:>8} bytes ({:.1} KiB)",
-            est.total_heap, est.total_heap as f64 / 1024.0);
+        println!(
+            "    Total estimated heap              = {:>8} bytes ({:.1} KiB)",
+            est.total_heap,
+            est.total_heap as f64 / 1024.0
+        );
         println!();
 
         let total = shallow + est.total_heap;
-        println!("  TOTAL (stack + heap estimate)      = {:>8} bytes ({:.1} KiB)",
-            total, total as f64 / 1024.0);
+        println!(
+            "  TOTAL (stack + heap estimate)      = {:>8} bytes ({:.1} KiB)",
+            total,
+            total as f64 / 1024.0
+        );
 
         let gb = 1024.0 * 1024.0 * 1024.0;
-        println!("  DIDs per 1 GiB RAM                 ~ {:>12.0}", gb / total as f64);
-        println!("  DIDs per 8 GiB RAM                 ~ {:>12.0}", 8.0 * gb / total as f64);
+        println!(
+            "  DIDs per 1 GiB RAM                 ~ {:>12.0}",
+            gb / total as f64
+        );
+        println!(
+            "  DIDs per 8 GiB RAM                 ~ {:>12.0}",
+            8.0 * gb / total as f64
+        );
     }
 
     // Now measure without delta log: in production, after compaction the delta
@@ -253,9 +314,14 @@ fn measure_memory_footprint() {
     println!("\n{:=<80}", "");
     println!("Summary Table");
     println!("{:=<80}", "");
-    println!("  {:>6} | {:>10} {:>10} | {:>10} | {:>12}",
-        "Size", "RAM(full)", "RAM(state)", "Disk(full)", "DIDs/GiB(state)");
-    println!("  {:->6}-+-{:->10}-{:->10}-+-{:->10}-+-{:->12}", "", "", "", "", "");
+    println!(
+        "  {:>6} | {:>10} {:>10} | {:>10} | {:>12}",
+        "Size", "RAM(full)", "RAM(state)", "Disk(full)", "DIDs/GiB(state)"
+    );
+    println!(
+        "  {:->6}-+-{:->10}-{:->10}-+-{:->10}-+-{:->12}",
+        "", "", "", "", ""
+    );
 
     let gb = 1024.0 * 1024.0 * 1024.0;
 
@@ -271,13 +337,22 @@ fn measure_memory_footprint() {
 
         let ser_full = doc.to_bytes().unwrap().len();
 
-        println!("  {:>6} | {:>8} B {:>8} B | {:>8} B | {:>12.0}",
-            label, ram_full, ram_state, ser_full, gb / ram_state as f64);
+        println!(
+            "  {:>6} | {:>8} B {:>8} B | {:>8} B | {:>12.0}",
+            label,
+            ram_full,
+            ram_state,
+            ser_full,
+            gb / ram_state as f64
+        );
     }
 
     println!("\n{:=<80}", "");
     println!("Notes:");
-    println!("  - 'Total' = stack frame ({} B) + estimated heap allocations", struct_size);
+    println!(
+        "  - 'Total' = stack frame ({} B) + estimated heap allocations",
+        struct_size
+    );
     println!("  - The full delta log is always retained (compaction is deferred — SPEC-036 §10)");
     println!("  - Delta log dominates for documents with many operations");
     println!("  - RAM(state) = materialised CRDT state with the delta log excluded");
