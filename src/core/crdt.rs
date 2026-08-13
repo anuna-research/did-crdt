@@ -514,16 +514,38 @@ impl Deactivated {
 
 /// The `alsoKnownAs` URI set, held as ONE last-writer-wins register.
 ///
-/// A register over the whole set, rather than the grow-set-plus-tombstone-set
-/// shape used for verification methods. That difference is deliberate. A 2P-Set
-/// can never re-add a removed element, and the application half of this binding
-/// (cbcl-bus's WebFinger store) supports reinstating a withdrawn alias. A 2P-Set
-/// here would make the two halves asymmetric: a binding the holder withdrew
+/// Two choices are encoded here, and they are decided by different facts.
+///
+/// **Why not a 2P-Set**, which is the shape used for verification methods: a
+/// 2P-Set can never re-add a removed element. The application half of this
+/// binding (cbcl-bus's WebFinger store) can reinstate a withdrawn alias, so a
+/// 2P-Set would make the halves asymmetric — a binding the holder withdrew
 /// could never be restored, while the authority's could.
 ///
-/// The cost is that concurrent writes from two devices do not union — the later
-/// timestamp wins wholesale and the other device's addition is lost. That is
-/// recoverable by writing again; a permanently unusable alias would not be.
+/// **Why a register over the whole set, rather than per-element LWW.** A
+/// whole-set register replaces everything on each write, so two devices editing
+/// concurrently do not union: the later timestamp wins and the other write is
+/// lost. That is only acceptable because the set holds a SINGLE alias — the
+/// stable, derived one. It is computed from the home DID and the account
+/// authority, so it has one writer-of-record and one lifecycle, and "replace the
+/// set" and "change the alias" are the same operation. With one element, a
+/// whole-set register and per-element LWW are indistinguishable.
+///
+// SIMPLIFY: the ceiling is a SECOND independently-managed alias. Two aliases
+// with separate lifecycles (a derived one plus, say, a user-chosen handle)
+// reintroduce lost updates: a write carrying one can silently drop the other,
+// including the derived alias the reciprocal binding depends on. Whole-set
+// replacement assumes read-modify-write, which is the race CRDTs exist to
+// avoid. The upgrade is per-element LWW — `BTreeMap<String, LWWReg<bool,
+// HlcTimestamp>>`, the same primitive `DocumentData` already uses — together
+// with a per-element op, since a whole-set op would have to diff against
+// current state and so reintroduce the read-modify-write it was meant to
+// remove. It also brings tombstones, which cannot be collected without causal
+// stability this design deliberately lacks.
+///
+/// The cardinality bound in `validate::MAX_ALSO_KNOWN_AS` is a resource bound
+/// against replicated bloat, NOT what keeps the above true. Nothing mechanical
+/// enforces the single-alias shape; it is a property of how aliases are minted.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AlsoKnownAs(LWWReg<Vec<String>, HlcTimestamp>);
 

@@ -661,16 +661,35 @@ A SetAlsoKnownAs delta SHALL replace the set entirely. An empty vector SHALL
 withdraw every alias, and a subsequent delta SHALL be able to reinstate a
 previously withdrawn alias.
 
-Reinstatement is the requirement that fixes the CRDT choice. The alias binding
-is two-party: the holder asserts it here, and the application publishes the
-reciprocal record. The application half is reinstatable, so a 2P-Set here --
-the shape used for verification methods -- would make the halves asymmetric,
-leaving a binding the holder had withdrawn permanently unrestorable from one
-end while restorable from the other.
+Two separate facts decide the CRDT, and they are worth keeping apart.
 
-The accepted cost is that concurrent writes from two devices do not union: the
-later timestamp wins wholesale. That is recoverable by writing again, whereas a
-permanently unusable alias is not.
+Reinstatement rules OUT a 2P-Set. The alias binding is two-party: the holder
+asserts it here and the application publishes the reciprocal record. The
+application half is reinstatable, so a 2P-Set -- the shape used for
+verification methods -- would make the halves asymmetric, leaving a binding the
+holder withdrew permanently unrestorable from one end while restorable from the
+other.
+
+The SINGLE-ALIAS shape is what makes a whole-set register admissible rather
+than per-element LWW. A whole-set register replaces everything on each write,
+so concurrent writes do not union -- the later timestamp wins and the other is
+lost. That is acceptable only because the set holds one alias, derived from the
+home DID and the account authority: one writer-of-record, one lifecycle, and
+"replace the set" and "change the alias" are the same operation. With one
+element the two shapes are indistinguishable.
+
+CEILING (SIMPLIFY). A second independently-managed alias breaks this. Two
+aliases with separate lifecycles reintroduce lost updates, and the write that
+loses may be the one carrying the derived alias the reciprocal binding depends
+on. Whole-set replacement assumes read-modify-write, which is the race CRDTs
+exist to avoid. The upgrade is per-element LWW keyed on the URI, plus a
+per-element delta op -- a whole-set op would have to diff against current state
+and so reintroduce the read-modify-write. It also brings tombstones, which
+cannot be collected without causal stability this design deliberately lacks.
+
+The cardinality bound in CON-007 is a resource bound against replicated bloat.
+It is NOT what keeps the above true: nothing mechanical enforces the
+single-alias shape, which is a property of how aliases are minted.
 
 The set SHALL be canonicalised (sorted, deduplicated) before storage, so that
 replicas which agree on the aliases agree on the content hash regardless of the
