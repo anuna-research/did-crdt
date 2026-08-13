@@ -366,6 +366,21 @@ impl Document {
             )));
         }
 
+        // 1a. Reserved-name gate — `documentData` may not carry a DID Core
+        //     property. Such a key projects into the same JSON object as the
+        //     typed fields and shadows it for any last-wins parser, which lets
+        //     it replace `verificationMethod` or restate `id`. Refused here so
+        //     the delta never enters the log; see
+        //     `resolve::RESERVED_DOCUMENT_PROPERTIES` for why the projection
+        //     ALSO filters.
+        if let DeltaOp::SetDocumentData { key, .. } = &delta.op {
+            if crate::core::resolve::is_reserved_document_property(key) {
+                return Err(Error::DeltaRejected(format!(
+                    "documentData key {key:?} is a reserved DID Core property"
+                )));
+            }
+        }
+
         // 1b. Idempotent dedup: if this exact delta is already held, re-applying
         //     it would derive fresh CRDT metadata (e.g. a new ORSWOT dot) and
         //     mutate state, content hash, and log even though the DAG already
@@ -869,8 +884,20 @@ impl Document {
                 });
             }
 
-            // Map LWW document data into the extra flat map.
+            // Map LWW document data into the extra flat map, refusing anything
+            // that would collide with a DID Core property.
+            //
+            // `extra` is flattened into the same JSON object as the typed
+            // fields, and serde does not deduplicate across that boundary — a
+            // key of `id` here emits a second `id` member and the consumer's
+            // parser decides which one counts. Filtering at projection rather
+            // than only at admission is deliberate: state-based merge unions
+            // `document_data` wholesale, so a reserved key can enter state
+            // without ever passing `merge`'s check.
             for (key, value) in self.document_data.iter() {
+                if crate::core::resolve::is_reserved_document_property(key) {
+                    continue;
+                }
                 doc.extra.insert(key.to_owned(), value.clone());
             }
 
@@ -1944,6 +1971,141 @@ mod tests {
     }
 
     #[test]
+    // ── documentData must not shadow DID Core properties ──────────────────────
+    #[test]
+    fn reserved_document_data_key_is_refused_at_admission() {
+        let (mut doc, _) = make_doc();
+        let signer = doc.verification_methods.entries()[0].id.clone();
+        for key in crate::core::resolve::RESERVED_DOCUMENT_PROPERTIES {
+            let err = merge_op(
+                &mut doc,
+                DeltaOp::SetDocumentData {
+                    key: (*key).to_owned(),
+                    value: serde_json::json!("anything"),
+                },
+                HlcTimestamp {
+                    wall_ms: 10,
+                    logical: 0,
+                    node_id: 1,
+                },
+                &signer,
+            );
+            assert!(
+                matches!(err, Err(Error::DeltaRejected(_))),
+                "{key} must be refused as a documentData key"
+            );
+        }
+    }
+
+    #[test]
+    fn state_borne_reserved_key_cannot_shadow_id() {
+        // Admission alone is not enough: state-based merge unions
+        // `document_data` wholesale, so a peer running older code — or a
+        // hostile one — can seat a reserved key without passing `merge`.
+        // Inserted directly here for exactly that reason.
+        let (mut doc, _) = make_doc();
+        let real_did = doc.did.clone();
+        doc.document_data.set(
+            "id".to_owned(),
+            serde_json::json!("did:crdt:ATTACKER"),
+            HlcTimestamp {
+                wall_ms: 99,
+                logical: 0,
+                node_id: 1,
+            },
+        );
+
+        let json_text =
+            serde_json::to_string(&doc.resolve().unwrap().did_document.unwrap()).unwrap();
+        // Reparse rather than inspect the struct: the defect only exists once
+        // the document is serialised, and it is the consumer's parse that
+        // decides which member wins.
+        let reparsed: Value = serde_json::from_str(&json_text).unwrap();
+        assert_eq!(
+            reparsed["id"],
+            serde_json::json!(real_did.as_str()),
+            "documentData must not be able to restate the document's own id"
+        );
+        assert_eq!(
+            json_text.matches("\"id\":").count(),
+            // One for the document, one for its single verification method.
+            2,
+            "no duplicate top-level id member may be emitted"
+        );
+    }
+
+    #[test]
+    fn injected_verification_method_cannot_outlive_its_revoked_key() {
+        // The sharpest form. A key writes a shadow `verificationMethod` into
+        // documentData and is then revoked. Revocation acts on the 2P-Set, and
+        // the injected value does not live there — so before the reserved-name
+        // gate it survived, and a last-wins parser saw ONLY the injected array.
+        // Privilege persisting past revocation is what the 2P-Set exists to
+        // prevent, so this is a regression test for that property, not for a
+        // serialisation nicety.
+        let (mut doc, _) = make_doc();
+        let genesis = doc.verification_methods.entries()[0].id.clone();
+        let k1 = format!("{}#key-1", doc.did);
+        merge_op(
+            &mut doc,
+            DeltaOp::AddVerificationMethod {
+                id: k1.clone(),
+                public_key_multibase: "zSecondKey".to_owned(),
+                suite_type: SuiteType::default(),
+                relationships: crate::core::delta::default_relationships(),
+            },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: 1,
+            },
+            &genesis,
+        )
+        .unwrap();
+
+        let injected = merge_op(
+            &mut doc,
+            DeltaOp::SetDocumentData {
+                key: "verificationMethod".to_owned(),
+                value: serde_json::json!([{"id": "injected", "type": "X", "controller": "c"}]),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: 1,
+            },
+            &k1,
+        );
+        assert!(matches!(injected, Err(Error::DeltaRejected(_))));
+
+        merge_op(
+            &mut doc,
+            DeltaOp::RevokeVerificationMethod { key_id: k1.clone() },
+            HlcTimestamp {
+                wall_ms: 30,
+                logical: 0,
+                node_id: 1,
+            },
+            &genesis,
+        )
+        .unwrap();
+        assert!(doc.is_vm_revoked(&k1));
+
+        let reparsed: Value = serde_json::from_str(
+            &serde_json::to_string(&doc.resolve().unwrap().did_document.unwrap()).unwrap(),
+        )
+        .unwrap();
+        let methods = reparsed["verificationMethod"].as_array().unwrap();
+        assert!(
+            methods
+                .iter()
+                .all(|m| m["id"] != serde_json::json!("injected")),
+            "a revoked key must not leave authentication material behind"
+        );
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0]["id"], serde_json::json!(genesis));
+    }
+
     // ── genesis key, published so a verifier can recompute the DID ────────────
     #[test]
     fn genesis_key_recomputes_the_did() {

@@ -105,6 +105,50 @@ pub struct ResolutionResult {
 
 // ── DidDocument ─────────────────────────────────────────────────────────────
 
+/// Top-level property names that DID Core defines, which `documentData` must
+/// never be allowed to emit.
+///
+/// `DidDocument::extra` is `#[serde(flatten)]`, so any key in it is written
+/// into the same JSON object as the typed fields. serde does not deduplicate
+/// across a flatten boundary: a `documentData` entry named `id` produces an
+/// object with TWO `id` members, and the meaning of that document is then
+/// whatever the consumer's parser decides. `serde_json` takes the last, so the
+/// injected value wins.
+///
+/// That is a document-integrity failure, not a cosmetic one. Shadowing
+/// `verificationMethod` replaces the authentication material a verifier sees
+/// while the CRDT's own key set is untouched — so the injected array survives
+/// revocation of the key that wrote it, because revocation acts on the 2P-Set
+/// and this value does not live there.
+///
+/// Both directions are closed, and BOTH are needed: `Document::merge` refuses a
+/// `SetDocumentData` naming one of these, and the projection skips them anyway,
+/// because state-based merge unions `DocumentData` wholesale without passing
+/// through delta admission. A peer running older code, or a hostile one, can
+/// still put a reserved key into state.
+pub const RESERVED_DOCUMENT_PROPERTIES: &[&str] = &[
+    "@context",
+    "id",
+    "alsoKnownAs",
+    "controller",
+    "verificationMethod",
+    "authentication",
+    "assertionMethod",
+    "keyAgreement",
+    "capabilityInvocation",
+    "capabilityDelegation",
+    "service",
+];
+
+/// Whether `key` is a DID Core property that `documentData` may not set.
+///
+/// Compared case-sensitively, matching DID Core, which defines these names
+/// exactly. A near-miss like `Id` is not reserved and does not collide, because
+/// JSON member names are case-sensitive too.
+pub fn is_reserved_document_property(key: &str) -> bool {
+    RESERVED_DOCUMENT_PROPERTIES.contains(&key)
+}
+
 /// A W3C DID Core JSON-LD document.
 ///
 /// Field names use the camelCase convention mandated by DID Core.

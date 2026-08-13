@@ -1,10 +1,10 @@
 ---
 title: "SPEC-032: did-crdt — Coordination-Free Decentralised Identifiers via Signed CRDTs"
 id: SPEC-032
-version: 0.1.0
+version: 0.2.0
 status: draft
 created: 2026-03-10
-last_updated: 2026-06-11
+last_updated: 2026-08-13
 authors: Anuna Research
 reviewers: Engineering, Security
 audience: stakeholders, engineers, protocol designers
@@ -533,10 +533,17 @@ containing:
 - didDocumentMetadata with created, updated, versionId (BLAKE3 of state)
 
 The resolved document SHALL validate against the DID Core JSON-LD schema.
+This forbids duplicate members: a document carrying two `id` values does not
+validate, and its meaning would be decided by the consumer's parser rather than
+by this system. See BUG-001.
 
 Trace:
 - TEST-011
+- TEST-025
+- TEST-026
+- TEST-027
 - CON-003
+- BUG-001
 ```
 
 ```
@@ -1972,6 +1979,56 @@ CON-006 §admission control
 
 ---
 
+```
+TEST-025: Reserved documentData Keys Refused at Admission (unit)
+
+Regression cover for BUG-001, admission direction.
+
+1. Create a document and, for EVERY name in the reserved DID Core property set,
+   submit a signed SetDocumentData delta using that name as its key.
+2. Assert: each is rejected as DeltaRejected, and none enters the delta log.
+
+Iterating the whole reserved set rather than a sample is deliberate: a name
+added to the set later without a matching guard would otherwise pass unnoticed.
+```
+
+```
+TEST-026: State-Borne Reserved Key Cannot Shadow id (unit)
+
+Regression cover for BUG-001, projection direction. Admission-time rejection is
+not sufficient on its own, because state-based merge unions documentData
+wholesale without passing through delta admission.
+
+1. Create a document, then insert a documentData entry named `id` DIRECTLY into
+   state, modelling what arrives from a peer running pre-fix code.
+2. Resolve, serialise, and re-parse the document.
+3. Assert: the parsed id is the document's real DID, and exactly one top-level
+   id member was emitted.
+
+The assertion is made after a serialise/parse round trip on purpose. The defect
+does not exist in the struct -- it exists only once the document is written out,
+and it is the consumer's parse that decides which member wins.
+```
+
+```
+TEST-027: Injected verificationMethod Cannot Outlive Its Revoked Key (unit)
+
+Regression cover for BUG-001's most serious consequence: authentication
+material persisting past revocation of the key that introduced it.
+
+1. Create a document with genesis key K0; add a second key K1.
+2. K1 submits a SetDocumentData delta setting `verificationMethod` to an array
+   containing an attacker-chosen method.
+3. Assert: the delta is rejected.
+4. Revoke K1, and assert the revocation took effect.
+5. Resolve, serialise, re-parse.
+6. Assert: verificationMethod contains exactly the genuine K0 entry, and no
+   injected entry.
+
+Step 3 is the fix; steps 4-6 assert the property the fix protects. Before the
+fix, step 2 succeeded and step 6 saw ONLY the injected array.
+```
+
 ## 12. Purity Boundary Map
 
 ### Pure Core (no I/O, no shared state, deterministic)
@@ -2103,7 +2160,7 @@ REQ-005 (Key Rotation)         → TEST-006, TEST-007 → crdt.rs          → O
 REQ-006 (Revocation)           → TEST-008          → crdt.rs          → OBS-003
 REQ-007 (Deactivation)         → TEST-009          → crdt.rs          → OBS-004 (deactivated_did)
 REQ-008 (HLC)                  → TEST-010          → hlc.rs           → (no OBS — internal)
-REQ-009 (W3C Resolution)       → TEST-011          → resolve.rs       → OBS-002
+REQ-009 (W3C Resolution)       → TEST-011, TEST-025, TEST-026, TEST-027 → resolve.rs, document.rs → OBS-002, OBS-004
 REQ-010 (Content-Addressed)    → TEST-012          → document.rs, store.rs → OBS-006
 REQ-011 (Library API)          → TEST-013          → lib.rs           → (no OBS — compile-time)
 REQ-012 (Service Mode)         → TEST-014          → service.rs       → OBS-002, OBS-005
@@ -2143,6 +2200,7 @@ CON-006 (DHT Discovery)        → TEST-022, TEST-023, TEST-024
 | State bloat (attacker grows document unboundedly) | State size monitoring (OBS-006). Future: compaction policy, field count limits. | OBS-006 |
 | Partition attack (isolate node, feed stale state) | CRDT merge is correct under arbitrary partitions. Peer count monitoring alerts on isolation. | TEST-016, OBS-005 |
 | Clock manipulation (push HLC into far future) | HLC rejects physical timestamps > wall_clock + max_drift. Configurable drift threshold. | TEST-010 |
+| Property shadowing via documentData (authorised key injects a duplicate DID Core member, so a last-wins parser reads the injected value) | Reserved DID Core property names refused at delta admission AND skipped at projection. Both are required: state-based merge unions documentData without passing admission. Note this defeated key revocation, since an injected verificationMethod does not live in the 2P-Set that revocation acts on. | BUG-001, TEST-025, TEST-026, TEST-027 |
 
 ### Cryptographic Requirements
 
@@ -2397,6 +2455,93 @@ in `docs/adr/`. The remaining questions are tracked for future work.
 - [x] Address open questions (compaction, key recovery, sybil resistance, state size limits) — see ADR-001 through ADR-004 in docs/adr/
 
 **Quality gates:** Zero fuzzing crashes. Security review passed. WASM compiles.
+
+
+---
+
+## 20. Defects
+
+```
+BUG-001: documentData Could Shadow Any DID Core Property
+
+Severity: high -- document integrity, and it defeats key revocation.
+Status:   fixed 2026-08-13. Never deployed; no live exposure.
+
+SYMPTOM
+
+A resolved DID document could contain two members of the same name. A
+consumer's answer to "what is this document's id" or "which keys authenticate
+it" then depended on which member its JSON parser kept.
+
+MECHANISM
+
+DidDocument.extra is serialised with serde's flatten, and the documentData
+LWW-Map was projected into it unfiltered. serde does not deduplicate across a
+flatten boundary, so a documentData entry whose key names a DID Core property
+emits a SECOND member of that name beside the typed field. serde_json retains
+the last, which is the injected one.
+
+EVIDENCE
+
+Setting documentData["id"] on an otherwise ordinary document produced:
+
+  "id":"did:crdt:a9baa8e5...", ..., "id":"did:crdt:ATTACKER"
+  re-parsed id -> "did:crdt:ATTACKER"
+
+IMPACT
+
+1. Revocation bypass. A key may write a shadow verificationMethod array into
+   documentData and then be revoked. Revocation acts on the 2P-Set; the
+   injected value does not live there, so it outlives the key that wrote it and
+   a last-wins parser sees only the injected array. Ending what a key can
+   assert is the entire purpose of revoking it.
+
+2. Identifier restatement. A holder could make their own document claim to be a
+   different DID -- the binding a verifier checks by recomputing the identifier
+   from the genesis public key.
+
+3. Every other DID Core property is equally shadowable, including
+   authentication, assertionMethod, controller and service.
+
+Submitting the delta requires an authorised key, so this is not reachable
+anonymously. It remains a privilege-persistence defect rather than a cosmetic
+one, for the reason in (1).
+
+It violates REQ-009 on both of that requirement's explicit terms: the resolved
+document's id no longer matched the DID, and an object carrying duplicate
+members does not validate against the DID Core JSON-LD schema. It is
+additionally a LangSec violation -- a trust-boundary projection emitting a
+document whose meaning is settled by the recipient's parser rather than by its
+producer.
+
+ROOT CAUSE
+
+An untyped escape hatch -- documentData accepts any JSON value under any key --
+was projected into a typed namespace, the DID document, with no reserved-name
+discipline at the join.
+
+RESOLUTION
+
+A reserved set of DID Core property names, enforced in BOTH directions:
+
+- Document::merge refuses a SetDocumentData naming a reserved property, so it
+  never enters the delta log.
+- The projection skips reserved keys however they arrived.
+
+Both are necessary. State-based merge unions documentData wholesale without
+passing delta admission, so a peer on older code -- or a hostile one -- can
+seat a reserved key directly into state; admission-time rejection alone leaves
+that path open.
+
+alsoKnownAs is reserved by this fix. It is a DID Core property and therefore
+requires a typed field rather than an untyped passthrough.
+
+Trace:
+- REQ-009
+- TEST-025
+- TEST-026
+- TEST-027
+```
 
 ---
 
