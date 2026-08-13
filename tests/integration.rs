@@ -53,8 +53,7 @@ mod two_node {
         let ra = a.resolve().expect("Node A: resolve");
         let rb = b.resolve().expect("Node B: resolve");
         assert_eq!(
-            ra.did_document_metadata.version_id,
-            rb.did_document_metadata.version_id,
+            ra.did_document_metadata.version_id, rb.did_document_metadata.version_id,
             "version_id must match after convergence"
         );
         let da = ra.did_document.as_ref().expect("Node A: document");
@@ -72,7 +71,10 @@ mod two_node {
         let (mut node_a, _creation_delta) =
             Document::new("zNodeAPublicKey").expect("Node A: create DID");
         let did = node_a.did.clone();
-        assert!(did.as_str().starts_with("did:crdt:"), "DID must be did:crdt scheme");
+        assert!(
+            did.as_str().starts_with("did:crdt:"),
+            "DID must be did:crdt scheme"
+        );
 
         // ── Step 2: Sync A → B (initial join) ─────────────────────────────────
         // Exercises state-based convergence (`Document::merge_state`) — the
@@ -85,14 +87,19 @@ mod two_node {
                 Document::new("zNodeAPublicKey").expect("Node B: mirror genesis");
             // fresh_b has the same genesis state as node_a (same key → same DID).
             // merge_state is idempotent, so applying A's state is safe.
-            fresh_b.merge_state(node_a.clone()).expect("Node B: initial state merge");
+            fresh_b
+                .merge_state(node_a.clone())
+                .expect("Node B: initial state merge");
             fresh_b
         };
 
         // ── Step 3: Verify B converged ────────────────────────────────────────
         assert_converged(&node_a, &node_b);
         let result_b_before = node_b.resolve().expect("Node B: resolve before update");
-        let doc_b_before = result_b_before.did_document.as_ref().expect("Node B: document");
+        let doc_b_before = result_b_before
+            .did_document
+            .as_ref()
+            .expect("Node B: document");
         assert_eq!(
             doc_b_before.id,
             did.to_string(),
@@ -114,7 +121,11 @@ mod two_node {
             .verification_method[0]
             .id
             .clone();
-        let ts_b = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 2 };
+        let ts_b = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 2,
+        };
         let svc_id = format!("{}#svc-node-b", did);
         let mut update_delta = SignedDelta::unsigned(
             did.clone(),
@@ -127,12 +138,21 @@ mod two_node {
             signer_b,
         );
         update_delta.parents = node_b.frontier();
-        node_b.merge(update_delta.clone()).expect("Node B: add service endpoint");
+        node_b
+            .merge(update_delta.clone())
+            .expect("Node B: add service endpoint");
 
         // Verify B's own state reflects the update.
         let result_b_after = node_b.resolve().expect("Node B: resolve after update");
-        let doc_b_after = result_b_after.did_document.as_ref().expect("Node B: document after update");
-        assert_eq!(doc_b_after.service.len(), 1, "Node B must have one service endpoint");
+        let doc_b_after = result_b_after
+            .did_document
+            .as_ref()
+            .expect("Node B: document after update");
+        assert_eq!(
+            doc_b_after.service.len(),
+            1,
+            "Node B must have one service endpoint"
+        );
         assert_eq!(doc_b_after.service[0].id, svc_id);
 
         // ── Step 5: Sync B → A (propagation) ──────────────────────────────────
@@ -143,11 +163,15 @@ mod two_node {
 
         // Path (a): state-based merge.
         let mut node_a_via_state = node_a.clone();
-        node_a_via_state.merge_state(node_b.clone()).expect("Node A: state-based merge");
+        node_a_via_state
+            .merge_state(node_b.clone())
+            .expect("Node A: state-based merge");
 
         // Path (b): delta-based merge.
         let mut node_a_via_delta = node_a.clone();
-        node_a_via_delta.merge(update_delta).expect("Node A: delta-based merge");
+        node_a_via_delta
+            .merge(update_delta)
+            .expect("Node A: delta-based merge");
 
         // Both paths must converge to Node B's state.
         assert_converged(&node_a_via_state, &node_b);
@@ -155,14 +179,15 @@ mod two_node {
 
         // ── Step 6: Verify A reflects the update ──────────────────────────────
         // Update node_a in-place (state-based path) for the final assertions.
-        node_a.merge_state(node_b.clone()).expect("Node A: final merge");
+        node_a
+            .merge_state(node_b.clone())
+            .expect("Node A: final merge");
 
         let result_a = node_a.resolve().expect("Node A: resolve");
         let result_b = node_b.resolve().expect("Node B: resolve");
 
         assert_eq!(
-            result_a.did_document_metadata.version_id,
-            result_b.did_document_metadata.version_id,
+            result_a.did_document_metadata.version_id, result_b.did_document_metadata.version_id,
             "Both nodes must resolve to identical version_id after full convergence"
         );
         let doc_a = result_a.did_document.as_ref().expect("Node A: document");
@@ -202,18 +227,30 @@ mod two_node {
             .clone();
 
         // Node A: revoke a credential.
-        let ts_a = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 };
+        let ts_a = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        };
         let mut delta_a = SignedDelta::unsigned(
             node_a.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-from-a".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-from-a".to_owned(),
+            },
             ts_a,
             signer.clone(),
         );
         delta_a.parents = node_a.frontier();
-        node_a.merge(delta_a.clone()).expect("Node A: revoke credential");
+        node_a
+            .merge(delta_a.clone())
+            .expect("Node A: revoke credential");
 
         // Node B: set document data (LWW-Map entry).
-        let ts_b = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 2 };
+        let ts_b = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 2,
+        };
         let mut delta_b = SignedDelta::unsigned(
             node_b.did.clone(),
             DeltaOp::SetDocumentData {
@@ -224,20 +261,29 @@ mod two_node {
             signer,
         );
         delta_b.parents = node_b.frontier();
-        node_b.merge(delta_b.clone()).expect("Node B: set document data");
+        node_b
+            .merge(delta_b.clone())
+            .expect("Node B: set document data");
 
         // Sync in both directions (full state exchange).
         let mut merged_a = node_a.clone();
-        merged_a.merge_state(node_b.clone()).expect("A merges B's state");
+        merged_a
+            .merge_state(node_b.clone())
+            .expect("A merges B's state");
 
         let mut merged_b = node_b.clone();
-        merged_b.merge_state(node_a.clone()).expect("B merges A's state");
+        merged_b
+            .merge_state(node_a.clone())
+            .expect("B merges A's state");
 
         // Both merged replicas must be identical (commutativity).
         assert_converged(&merged_a, &merged_b);
 
         // Both updates must be present in the merged state.
-        assert!(merged_a.is_revoked("cred-from-a"), "revocation from A must survive merge");
+        assert!(
+            merged_a.is_revoked("cred-from-a"),
+            "revocation from A must survive merge"
+        );
         let result = merged_a.resolve().expect("resolve merged_a");
         let doc = result.did_document.as_ref().expect("document for merged_a");
         assert_eq!(
@@ -252,8 +298,7 @@ mod two_node {
     #[test]
     fn two_node_delta_based_sync() {
         // Node A creates a DID.
-        let (mut node_a, creation_delta) =
-            Document::new("zDeltaSyncKey").expect("Node A: create");
+        let (mut node_a, creation_delta) = Document::new("zDeltaSyncKey").expect("Node A: create");
 
         // Node A adds a verification method (second key).
         let signer = node_a
@@ -265,7 +310,11 @@ mod two_node {
             .verification_method[0]
             .id
             .clone();
-        let ts1 = HlcTimestamp { wall_ms: 500, logical: 0, node_id: 1 };
+        let ts1 = HlcTimestamp {
+            wall_ms: 500,
+            logical: 0,
+            node_id: 1,
+        };
         let mut add_key_delta = SignedDelta::unsigned(
             node_a.did.clone(),
             DeltaOp::AddVerificationMethod {
@@ -278,24 +327,39 @@ mod two_node {
             signer,
         );
         add_key_delta.parents = node_a.frontier();
-        node_a.merge(add_key_delta.clone()).expect("Node A: add key");
+        node_a
+            .merge(add_key_delta.clone())
+            .expect("Node A: add key");
         assert_eq!(
-            node_a.resolve().expect("resolve A").did_document.unwrap().verification_method.len(),
+            node_a
+                .resolve()
+                .expect("resolve A")
+                .did_document
+                .unwrap()
+                .verification_method
+                .len(),
             2,
             "Node A must have two verification methods"
         );
 
         // Node B starts fresh and replays A's delta log in order.
-        let (mut node_b, _) =
-            Document::new("zDeltaSyncKey").expect("Node B: mirror genesis");
+        let (mut node_b, _) = Document::new("zDeltaSyncKey").expect("Node B: mirror genesis");
         // Node B already has the creation delta applied (same key → same genesis).
         // Apply the subsequent delta.
-        node_b.merge(add_key_delta).expect("Node B: apply delta from A");
+        node_b
+            .merge(add_key_delta)
+            .expect("Node B: apply delta from A");
 
         // Verify B converged to A's state.
         assert_converged(&node_a, &node_b);
         assert_eq!(
-            node_b.resolve().expect("resolve B").did_document.unwrap().verification_method.len(),
+            node_b
+                .resolve()
+                .expect("resolve B")
+                .did_document
+                .unwrap()
+                .verification_method
+                .len(),
             2,
             "Node B must have two verification methods after delta replay"
         );
@@ -348,7 +412,11 @@ mod offline_reunion {
 
         // ── Step 2: partition — Node A applies 50 deltas ──────────────────────
         for i in 0u64..50 {
-            let ts = HlcTimestamp { wall_ms: 1_000 + i, logical: 0, node_id: 1 };
+            let ts = HlcTimestamp {
+                wall_ms: 1_000 + i,
+                logical: 0,
+                node_id: 1,
+            };
             let mut delta = SignedDelta::unsigned(
                 did.clone(),
                 DeltaOp::SetDocumentData {
@@ -359,12 +427,18 @@ mod offline_reunion {
                 signer.clone(),
             );
             delta.parents = node_a.frontier();
-            node_a.merge(delta).unwrap_or_else(|e| panic!("Node A delta {i}: {e}"));
+            node_a
+                .merge(delta)
+                .unwrap_or_else(|e| panic!("Node A delta {i}: {e}"));
         }
 
         // ── Step 3: partition — Node B applies 30 deltas ──────────────────────
         for i in 0u64..30 {
-            let ts = HlcTimestamp { wall_ms: 2_000 + i, logical: 0, node_id: 2 };
+            let ts = HlcTimestamp {
+                wall_ms: 2_000 + i,
+                logical: 0,
+                node_id: 2,
+            };
             let mut delta = SignedDelta::unsigned(
                 did.clone(),
                 DeltaOp::SetDocumentData {
@@ -375,32 +449,61 @@ mod offline_reunion {
                 signer.clone(),
             );
             delta.parents = node_b.frontier();
-            node_b.merge(delta).unwrap_or_else(|e| panic!("Node B delta {i}: {e}"));
+            node_b
+                .merge(delta)
+                .unwrap_or_else(|e| panic!("Node B delta {i}: {e}"));
         }
 
         // Sanity: verify each node only has its own fields before reunion.
-        let pre_a = node_a.resolve().expect("pre-reunion resolve A").did_document.unwrap();
-        assert_eq!(pre_a.extra.len(), 50, "Node A must have exactly 50 fields pre-reunion");
-        let pre_b = node_b.resolve().expect("pre-reunion resolve B").did_document.unwrap();
-        assert_eq!(pre_b.extra.len(), 30, "Node B must have exactly 30 fields pre-reunion");
+        let pre_a = node_a
+            .resolve()
+            .expect("pre-reunion resolve A")
+            .did_document
+            .unwrap();
+        assert_eq!(
+            pre_a.extra.len(),
+            50,
+            "Node A must have exactly 50 fields pre-reunion"
+        );
+        let pre_b = node_b
+            .resolve()
+            .expect("pre-reunion resolve B")
+            .did_document
+            .unwrap();
+        assert_eq!(
+            pre_b.extra.len(),
+            30,
+            "Node B must have exactly 30 fields pre-reunion"
+        );
 
         // ── Step 4: partition healed — bidirectional state-based reunion ───────
-        node_a.merge_state(node_b.clone()).expect("Node A merges B's state");
-        node_b.merge_state(node_a.clone()).expect("Node B merges A's state");
+        node_a
+            .merge_state(node_b.clone())
+            .expect("Node A merges B's state");
+        node_b
+            .merge_state(node_a.clone())
+            .expect("Node B merges A's state");
 
         // ── Step 5: assert convergence ────────────────────────────────────────
         let result_a = node_a.resolve().expect("post-reunion resolve A");
         let result_b = node_b.resolve().expect("post-reunion resolve B");
 
         assert_eq!(
-            result_a.did_document_metadata.version_id,
-            result_b.did_document_metadata.version_id,
+            result_a.did_document_metadata.version_id, result_b.did_document_metadata.version_id,
             "version_id must match after offline reunion"
         );
         let ra = result_a.did_document.unwrap();
         let rb = result_b.did_document.unwrap();
-        assert_eq!(ra.extra.len(), 80, "merged document must contain all 80 fields");
-        assert_eq!(rb.extra.len(), 80, "merged document must contain all 80 fields");
+        assert_eq!(
+            ra.extra.len(),
+            80,
+            "merged document must contain all 80 fields"
+        );
+        assert_eq!(
+            rb.extra.len(),
+            80,
+            "merged document must contain all 80 fields"
+        );
 
         // Verify every A-field is present with correct value.
         for i in 0u64..50 {
@@ -448,11 +551,11 @@ mod offline_reunion {
 #[cfg(feature = "service")]
 mod http_api {
     use base64ct::{Base64UrlUnpadded, Encoding as _};
-    use did_crdt::service::server::Server;
     use did_crdt::core::{
         delta::{DeltaOp, SignedDelta, SigningKey},
         hlc::HlcTimestamp,
     };
+    use did_crdt::service::server::Server;
 
     #[tokio::test]
     async fn create_resolve_update_notfound() {
@@ -468,7 +571,10 @@ mod http_api {
         // (`u` prefix, no padding) as required by the document model.
         let raw = [0xDDu8; 32];
         let sk = ed25519_dalek::SigningKey::from_bytes(&raw);
-        let pk_mb = format!("u{}", Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
 
         // ── Step 2: POST /dids ────────────────────────────────────────────────
         let resp = client
@@ -480,8 +586,14 @@ mod http_api {
         assert_eq!(resp.status(), 201, "POST /dids must return 201 Created");
 
         let body: serde_json::Value = resp.json().await.expect("parse POST /dids body");
-        let did_str = body["did"].as_str().expect("response must contain 'did' field").to_owned();
-        assert!(did_str.starts_with("did:crdt:"), "DID must be did:crdt scheme");
+        let did_str = body["did"]
+            .as_str()
+            .expect("response must contain 'did' field")
+            .to_owned();
+        assert!(
+            did_str.starts_with("did:crdt:"),
+            "DID must be did:crdt scheme"
+        );
 
         // ── Step 3: GET /{did} ────────────────────────────────────────────────
         let resp = client
@@ -499,7 +611,9 @@ mod http_api {
             "resolved document id must match the created DID"
         );
         assert!(
-            doc["verificationMethod"].as_array().map_or(false, |a| !a.is_empty()),
+            doc["verificationMethod"]
+                .as_array()
+                .map_or(false, |a| !a.is_empty()),
             "resolved document must have at least one verification method"
         );
 
@@ -508,13 +622,18 @@ mod http_api {
         // so unsigned deltas on active documents are rejected with 403.
         let did: did_crdt::core::did::Did = did_str.parse().expect("parse DID");
         let node_id = did_crdt::core::validate::node_id_from_pubkey(sk.verifying_key().as_bytes());
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id };
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id,
+        };
         let signer = format!("{did}#key-0");
         let signing_key = SigningKey::Ed25519(sk);
         // Ground the delta on the document's frontier (SPEC-036). Genesis is
         // deterministic, so the client recomputes its hash from the public key;
         // exposing the live frontier via the API is a follow-up (SPEC-036 §1a).
-        let (_ref_doc, genesis_delta) = did_crdt::Document::new(&pk_mb).expect("reconstruct genesis");
+        let (_ref_doc, genesis_delta) =
+            did_crdt::Document::new(&pk_mb).expect("reconstruct genesis");
         let parents = vec![genesis_delta.content_hash().expect("genesis hash")];
         let delta = SignedDelta::new_with_parents(
             did.clone(),
@@ -547,8 +666,14 @@ mod http_api {
         assert_eq!(resp.status(), 200);
 
         let result: serde_json::Value = resp.json().await.expect("parse re-resolve body");
-        let services = result["didDocument"]["service"].as_array().expect("document must have 'service' array");
-        assert_eq!(services.len(), 1, "document must have one service endpoint after delta");
+        let services = result["didDocument"]["service"]
+            .as_array()
+            .expect("document must have 'service' array");
+        assert_eq!(
+            services.len(),
+            1,
+            "document must have one service endpoint after delta"
+        );
         assert_eq!(
             services[0]["id"].as_str().unwrap_or(""),
             format!("{did}#svc-test"),
@@ -598,8 +723,14 @@ mod two_node_sync_messages {
         let signer = format!("{}#key-0", did);
         let mut update = SignedDelta::unsigned(
             did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "c1".to_owned() },
-            HlcTimestamp { wall_ms: 100, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "c1".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 100,
+                logical: 0,
+                node_id: 1,
+            },
             signer,
         );
         update.parents = node_a.frontier();
@@ -610,8 +741,16 @@ mod two_node_sync_messages {
 
         // Step 1: A computes its content hash and broadcasts ANNOUNCE.
         let hash = node_a.content_hash().expect("content_hash must succeed");
-        let clock = HlcTimestamp { wall_ms: 0, logical: 0, node_id: 1 };
-        let announce = SyncMessage::Announce { did: did.clone(), hash: *hash.as_bytes(), clock };
+        let clock = HlcTimestamp {
+            wall_ms: 0,
+            logical: 0,
+            node_id: 1,
+        };
+        let announce = SyncMessage::Announce {
+            did: did.clone(),
+            hash: *hash.as_bytes(),
+            clock,
+        };
         let recv_announce: SyncMessage =
             serde_json::from_slice(&serde_json::to_vec(&announce).expect("serialise ANNOUNCE"))
                 .expect("deserialise ANNOUNCE");
@@ -620,7 +759,10 @@ mod two_node_sync_messages {
         let request = match recv_announce {
             SyncMessage::Announce { did: ann_did, .. } => {
                 assert_eq!(ann_did, did);
-                SyncMessage::Request { did: ann_did, frontier: node_b.frontier() }
+                SyncMessage::Request {
+                    did: ann_did,
+                    frontier: node_b.frontier(),
+                }
             }
             _ => panic!("expected Announce"),
         };
@@ -630,11 +772,21 @@ mod two_node_sync_messages {
 
         // Step 3: A receives REQUEST, responds with the DELTAS above B's frontier.
         let deltas_msg = match recv_request {
-            SyncMessage::Request { did: req_did, frontier } => {
+            SyncMessage::Request {
+                did: req_did,
+                frontier,
+            } => {
                 assert_eq!(req_did, did);
                 let deltas = node_a.deltas_for_peer(&frontier).expect("deltas_for_peer");
-                assert_eq!(deltas.len(), 1, "B lacks exactly the one post-genesis delta");
-                SyncMessage::Deltas { did: req_did, deltas }
+                assert_eq!(
+                    deltas.len(),
+                    1,
+                    "B lacks exactly the one post-genesis delta"
+                );
+                SyncMessage::Deltas {
+                    did: req_did,
+                    deltas,
+                }
             }
             _ => panic!("expected Request"),
         };
@@ -657,8 +809,7 @@ mod two_node_sync_messages {
         let ra = node_a.resolve().expect("resolve A");
         let rb = node_b.resolve().expect("resolve B");
         assert_eq!(
-            ra.did_document_metadata.version_id,
-            rb.did_document_metadata.version_id,
+            ra.did_document_metadata.version_id, rb.did_document_metadata.version_id,
             "Nodes must converge after Announce→Request→Deltas exchange"
         );
         assert!(ra.did_document.is_some());
@@ -711,7 +862,9 @@ mod cold_start_convergence {
             Duration::from_secs(5),
         ));
         let topic = topic_for(b"did-crdt/test-023-cold-start");
-        let node_a = LiveNode::bind(topic, docs_a.clone(), Some(dht_a.clone()), false).await.unwrap();
+        let node_a = LiveNode::bind(topic, docs_a.clone(), Some(dht_a.clone()), false)
+            .await
+            .unwrap();
         let _task_a = node_a.spawn();
         node_a.seed().await.unwrap();
 
@@ -722,7 +875,9 @@ mod cold_start_convergence {
             addr_store.clone(),
             Duration::from_secs(5),
         ));
-        let node_b = LiveNode::bind(topic, docs_b.clone(), Some(dht_b.clone()), false).await.unwrap();
+        let node_b = LiveNode::bind(topic, docs_b.clone(), Some(dht_b.clone()), false)
+            .await
+            .unwrap();
         let _task_b = node_b.spawn();
         node_b.seed().await.unwrap();
 
@@ -745,15 +900,26 @@ mod cold_start_convergence {
         let addr_a = listener_a.local_addr().unwrap();
         let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr_b = listener_b.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener_a, build_router(state_a)).await.unwrap() });
-        tokio::spawn(async move { axum::serve(listener_b, build_router(state_b)).await.unwrap() });
+        tokio::spawn(async move {
+            axum::serve(listener_a, build_router(state_a))
+                .await
+                .unwrap()
+        });
+        tokio::spawn(async move {
+            axum::serve(listener_b, build_router(state_b))
+                .await
+                .unwrap()
+        });
 
         // ── Step 1: node A creates DID D (POST /dids) ────────────────────────
         // This triggers DHT publish — storing both the pkarr record and the
         // full NodeAddr (with direct socket addresses) in the shared stubs.
         let raw = [0xE3u8; 32];
         let sk = ed25519_dalek::SigningKey::from_bytes(&raw);
-        let pk_mb = format!("u{}", Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
 
         let client = reqwest::Client::new();
         let resp = client
@@ -765,7 +931,10 @@ mod cold_start_convergence {
         assert_eq!(resp.status(), 201, "node A must accept DID creation");
         let body: serde_json::Value = resp.json().await.unwrap();
         let did_str = body["did"].as_str().unwrap().to_owned();
-        assert!(did_str.starts_with("did:crdt:"), "response must contain a did:crdt DID");
+        assert!(
+            did_str.starts_with("did:crdt:"),
+            "response must contain a did:crdt DID"
+        );
 
         // ── Step 2: get node A's versionId as the convergence target ─────────
         let resp: serde_json::Value = client
@@ -776,9 +945,14 @@ mod cold_start_convergence {
             .json()
             .await
             .unwrap();
-        let a_version_id =
-            resp["didDocumentMetadata"]["versionId"].as_str().unwrap().to_owned();
-        assert!(!a_version_id.is_empty(), "node A must have a non-empty versionId");
+        let a_version_id = resp["didDocumentMetadata"]["versionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            !a_version_id.is_empty(),
+            "node A must have a non-empty versionId"
+        );
 
         // ── Step 3: node B cold-start resolves DID D (GET /:did on node B) ───
         // Node B's DocStore is empty; the handler triggers cold_start_bootstrap:
@@ -795,7 +969,11 @@ mod cold_start_convergence {
             .await
             .expect("GET /:did from node B");
 
-        assert_eq!(resp.status(), 200, "node B cold-start resolve must return 200 OK (TEST-023)");
+        assert_eq!(
+            resp.status(),
+            200,
+            "node B cold-start resolve must return 200 OK (TEST-023)"
+        );
         assert!(
             start.elapsed() < Duration::from_secs(15),
             "cold-start resolve must complete within 15 s (NFR-008)"
@@ -850,7 +1028,10 @@ mod live_two_node {
         // ── Shared keypair and DID ────────────────────────────────────────────
         let raw = [0xA7u8; 32];
         let sk = ed25519_dalek::SigningKey::from_bytes(&raw);
-        let pk_mb = format!("u{}", Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
         let nid = node_id_from_pubkey(sk.verifying_key().as_bytes());
         let (doc_a, genesis_delta) = Document::new(&pk_mb).expect("create DID");
         let did = doc_a.did.clone();
@@ -865,8 +1046,12 @@ mod live_two_node {
 
         // ── Gossip setup (spawn run-loops before seed/connect) ────────────────
         let topic = topic_for(b"did-crdt/test-live-delta");
-        let node_a = LiveNode::bind(topic, docs_a.clone(), None, false).await.unwrap();
-        let node_b = LiveNode::bind(topic, docs_b.clone(), None, true).await.unwrap();
+        let node_a = LiveNode::bind(topic, docs_a.clone(), None, false)
+            .await
+            .unwrap();
+        let node_b = LiveNode::bind(topic, docs_b.clone(), None, true)
+            .await
+            .unwrap();
         let _task_a = node_a.spawn();
         let _task_b = node_b.spawn();
         node_a.seed().await.unwrap();
@@ -892,23 +1077,44 @@ mod live_two_node {
         let addr_a = listener_a.local_addr().unwrap();
         let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr_b = listener_b.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener_a, build_router(state_a)).await.unwrap() });
-        tokio::spawn(async move { axum::serve(listener_b, build_router(state_b)).await.unwrap() });
+        tokio::spawn(async move {
+            axum::serve(listener_a, build_router(state_a))
+                .await
+                .unwrap()
+        });
+        tokio::spawn(async move {
+            axum::serve(listener_b, build_router(state_b))
+                .await
+                .unwrap()
+        });
 
         // ── Step 1: GET /:did from both nodes (baseline version_id) ──────────
         let client = reqwest::Client::new();
         let base_a: serde_json::Value = client
             .get(format!("http://{addr_a}/{did_str}"))
-            .send().await.unwrap().json().await.unwrap();
-        let base_version =
-            base_a["didDocumentMetadata"]["versionId"].as_str().unwrap().to_owned();
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let base_version = base_a["didDocumentMetadata"]["versionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         // ── Step 2: POST a signed delta to node A ────────────────────────────
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: nid };
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: nid,
+        };
         let signing_key = SigningKey::Ed25519(sk);
         let delta = SignedDelta::new_with_parents(
             did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "live-test-cred".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "live-test-cred".to_owned(),
+            },
             ts,
             vec![genesis_hash],
             signer_id,
@@ -919,24 +1125,40 @@ mod live_two_node {
         let resp = client
             .post(format!("http://{addr_a}/dids/{did_str}/deltas"))
             .json(&delta)
-            .send().await
+            .send()
+            .await
             .expect("POST /deltas to node A");
         assert_eq!(resp.status(), 202, "node A must accept the delta");
 
         // ── Step 3: Get node A's new version_id after applying the delta ─────
         let after_a: serde_json::Value = client
             .get(format!("http://{addr_a}/{did_str}"))
-            .send().await.unwrap().json().await.unwrap();
-        let updated_version =
-            after_a["didDocumentMetadata"]["versionId"].as_str().unwrap().to_owned();
-        assert_ne!(updated_version, base_version, "applying delta must update version_id");
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let updated_version = after_a["didDocumentMetadata"]["versionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(
+            updated_version, base_version,
+            "applying delta must update version_id"
+        );
 
         // ── Step 4: Poll node B until it reflects the same version_id ────────
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             let resp: serde_json::Value = client
                 .get(format!("http://{addr_b}/{did_str}"))
-                .send().await.unwrap().json().await.unwrap();
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
             if resp["didDocumentMetadata"]["versionId"].as_str() == Some(&updated_version) {
                 break;
             }

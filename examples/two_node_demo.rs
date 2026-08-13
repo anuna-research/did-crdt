@@ -42,7 +42,10 @@ async fn main() -> anyhow::Result<()> {
     println!("[1/6] Generating Ed25519 keypair …");
     let raw = [0x42u8; 32];
     let sk = ed25519_dalek::SigningKey::from_bytes(&raw);
-    let pk_mb = format!("u{}", Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes()));
+    let pk_mb = format!(
+        "u{}",
+        Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+    );
     let (doc_template, genesis_delta) = Document::new(&pk_mb)?;
     let did = doc_template.did.clone();
     let did_str = did.to_string();
@@ -81,7 +84,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr_a = listener_a.local_addr()?;
-    tokio::spawn(async move { axum::serve(listener_a, build_router(state_a)).await.unwrap() });
+    tokio::spawn(async move {
+        axum::serve(listener_a, build_router(state_a))
+            .await
+            .unwrap()
+    });
     println!("      HTTP: http://{addr_a}\n");
 
     // ── [3/6] Node B ──────────────────────────────────────────────────────────
@@ -109,7 +116,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr_b = listener_b.local_addr()?;
-    tokio::spawn(async move { axum::serve(listener_b, build_router(state_b)).await.unwrap() });
+    tokio::spawn(async move {
+        axum::serve(listener_b, build_router(state_b))
+            .await
+            .unwrap()
+    });
     println!("      HTTP: http://{addr_b}\n");
 
     // ── [4/6] Create DID on node A ────────────────────────────────────────────
@@ -137,12 +148,18 @@ async fn main() -> anyhow::Result<()> {
     // ── [5/6] Submit a signed delta to node A ────────────────────────────────
     println!("[5/6] Submitting signed delta to node A (revoking credential) …");
     let nid = node_id_from_pubkey(sk.verifying_key().as_bytes());
-    let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: nid };
+    let ts = HlcTimestamp {
+        wall_ms: 1_000,
+        logical: 0,
+        node_id: nid,
+    };
     let signer_id = format!("{did}#key-0");
     let signing_key = SigningKey::Ed25519(sk);
     let delta = SignedDelta::new_with_parents(
         did.clone(),
-        DeltaOp::RevokeCredential { credential_id: "demo-credential-001".to_owned() },
+        DeltaOp::RevokeCredential {
+            credential_id: "demo-credential-001".to_owned(),
+        },
         ts,
         vec![genesis_hash],
         signer_id,
@@ -154,7 +171,11 @@ async fn main() -> anyhow::Result<()> {
         .json(&delta)
         .send()
         .await?;
-    assert_eq!(resp.status().as_u16(), 202, "delta must be accepted by node A");
+    assert_eq!(
+        resp.status().as_u16(),
+        202,
+        "delta must be accepted by node A"
+    );
 
     let after_a: Value = client
         .get(format!("http://{addr_a}/{did_str}"))
@@ -183,7 +204,10 @@ async fn main() -> anyhow::Result<()> {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(20);
     loop {
-        let resp = client.get(format!("http://{addr_b}/{did_str}")).send().await?;
+        let resp = client
+            .get(format!("http://{addr_b}/{did_str}"))
+            .send()
+            .await?;
         if resp.status().is_success() {
             let body: Value = resp.json().await?;
             if body["didDocumentMetadata"]["versionId"].as_str() == Some(&version_after) {
@@ -195,7 +219,10 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
         }
-        assert!(Instant::now() < deadline, "node B did not converge within 20 s");
+        assert!(
+            Instant::now() < deadline,
+            "node B did not converge within 20 s"
+        );
         print!(".");
         std::io::stdout().flush()?;
         tokio::time::sleep(Duration::from_millis(100)).await;

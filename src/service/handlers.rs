@@ -19,7 +19,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::core::{delta::{SignedDelta, MAX_DELTA_SIZE}, did::Did, document::Document, resolve::ResolutionResult, validate, Error};
+use crate::core::{
+    delta::{SignedDelta, MAX_DELTA_SIZE},
+    did::Did,
+    document::Document,
+    resolve::ResolutionResult,
+    validate, Error,
+};
 
 use super::server::AppState;
 
@@ -85,7 +91,9 @@ pub async fn create_did(
     };
 
     let state_bytes = doc.to_bytes().map(|b| b.len() as i64).unwrap_or(0);
-    state.metrics.record_delta_accepted(&truncate_did(&did_str), state_bytes);
+    state
+        .metrics
+        .record_delta_accepted(&truncate_did(&did_str), state_bytes);
 
     state.docs.lock().insert(did.clone(), doc);
 
@@ -120,7 +128,13 @@ pub async fn create_did(
         });
     }
 
-    (StatusCode::CREATED, Json(CreateDidResponse { did: did_str, document: resolution_result }))
+    (
+        StatusCode::CREATED,
+        Json(CreateDidResponse {
+            did: did_str,
+            document: resolution_result,
+        }),
+    )
         .into_response()
 }
 
@@ -131,10 +145,7 @@ pub async fn create_did(
 /// - 200 with DID document on success
 /// - 404 if not found in local state
 /// - 410 Gone if the DID is deactivated
-pub async fn resolve_did(
-    State(state): State<AppState>,
-    Path(did_str): Path<String>,
-) -> Response {
+pub async fn resolve_did(State(state): State<AppState>, Path(did_str): Path<String>) -> Response {
     let start = Instant::now();
 
     let did: Did = match did_str.parse() {
@@ -181,6 +192,16 @@ pub async fn resolve_did(
 
     state.metrics.observe_resolution(elapsed, field_count);
 
+    // Stamp this node's identity, if it claims one. Done HERE rather than in
+    // `Document::resolve` because the core has no idea which node it is running
+    // in — and a library caller resolving locally has no resolver to name.
+    //
+    // `clone` per response is a short string on a path that has just walked a
+    // CRDT and serialised a document.
+    let mut result = result;
+    result.did_resolution_metadata.resolver_id = state.resolver_id.clone();
+    let result = result;
+
     if result.did_document_metadata.deactivated {
         return (StatusCode::GONE, Json(result)).into_response();
     }
@@ -217,7 +238,10 @@ pub async fn submit_delta(
     }
 
     if delta.did.to_string() != did_str {
-        return (StatusCode::BAD_REQUEST, "DID in path does not match DID in delta")
+        return (
+            StatusCode::BAD_REQUEST,
+            "DID in path does not match DID in delta",
+        )
             .into_response();
     }
 
@@ -268,7 +292,9 @@ pub async fn submit_delta(
 
     match merge_result {
         Ok(()) => {
-            state.metrics.record_delta_accepted(&truncate_did(&did_str), state_bytes);
+            state
+                .metrics
+                .record_delta_accepted(&truncate_did(&did_str), state_bytes);
             // Announce the updated state to peers so they can reconcile (CON-004 step 4).
             #[cfg(feature = "sync")]
             if let Some(node) = &state.live_node {

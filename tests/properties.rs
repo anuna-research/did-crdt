@@ -50,8 +50,11 @@ fn genesis() -> Document {
 /// Generate an HLC timestamp for a given node, with a non-zero wall component
 /// (> 0 so it is always strictly later than the zero-value genesis timestamp).
 fn arb_hlc(node_id: u64) -> impl Strategy<Value = HlcTimestamp> {
-    (1u64..=100_000u64, 0u32..=255u32)
-        .prop_map(move |(wall_ms, logical)| HlcTimestamp { wall_ms, logical, node_id })
+    (1u64..=100_000u64, 0u32..=255u32).prop_map(move |(wall_ms, logical)| HlcTimestamp {
+        wall_ms,
+        logical,
+        node_id,
+    })
 }
 
 /// Generate an arbitrary `DeltaOp` from the subset whose effects are
@@ -73,7 +76,11 @@ fn arb_delta_op() -> impl Strategy<Value = DeltaOp> {
         // The service_type and endpoint are fully determined by svc_idx,
         // guaranteeing at most one distinct ServiceEntry per ID.
         (0u8..5u8).prop_map(|svc| {
-            let stype = if svc % 2 == 0 { "LinkedDomains" } else { "DIDCommMessaging" };
+            let stype = if svc % 2 == 0 {
+                "LinkedDomains"
+            } else {
+                "DIDCommMessaging"
+            };
             DeltaOp::AddServiceEndpoint {
                 id: format!("svc-{svc}"),
                 service_type: stype.to_owned(),
@@ -164,8 +171,10 @@ fn same_observable_state(a: &Document, b: &Document) -> bool {
     let res_a = a.resolve().expect("resolve a");
     let res_b = b.resolve().expect("resolve b");
     // Compare version_id (content hash) and the document itself.
-    let ra = serde_json::to_string(&(&res_a.did_document, &res_a.did_document_metadata.version_id)).expect("serialize a");
-    let rb = serde_json::to_string(&(&res_b.did_document, &res_b.did_document_metadata.version_id)).expect("serialize b");
+    let ra = serde_json::to_string(&(&res_a.did_document, &res_a.did_document_metadata.version_id))
+        .expect("serialize a");
+    let rb = serde_json::to_string(&(&res_b.did_document, &res_b.did_document_metadata.version_id))
+        .expect("serialize b");
     ra == rb
 }
 
@@ -571,7 +580,11 @@ proptest! {
 #[test]
 fn regression_concurrent_add_remove_converges_via_delta_path() {
     let base = genesis();
-    let hlc = |w: u64, n: u64| HlcTimestamp { wall_ms: w, logical: 0, node_id: n };
+    let hlc = |w: u64, n: u64| HlcTimestamp {
+        wall_ms: w,
+        logical: 0,
+        node_id: n,
+    };
     let add = (
         DeltaOp::AddServiceEndpoint {
             id: "svc-x".to_owned(),
@@ -580,7 +593,12 @@ fn regression_concurrent_add_remove_converges_via_delta_path() {
         },
         hlc(10, 1),
     );
-    let remove = (DeltaOp::RemoveServiceEndpoint { id: "svc-x".to_owned() }, hlc(10, 2));
+    let remove = (
+        DeltaOp::RemoveServiceEndpoint {
+            id: "svc-x".to_owned(),
+        },
+        hlc(10, 2),
+    );
 
     // A adds svc-x (node 1). B concurrently removes svc-x (node 2) without ever
     // having seen the add. Both are grounded on genesis, so they are concurrent.
@@ -641,7 +659,11 @@ mod unit {
     }
 
     fn ts(wall: u64, node: u64) -> HlcTimestamp {
-        HlcTimestamp { wall_ms: wall, logical: 0, node_id: node }
+        HlcTimestamp {
+            wall_ms: wall,
+            logical: 0,
+            node_id: node,
+        }
     }
 
     // ── Revocation G-Set ──────────────────────────────────────────────────────
@@ -653,10 +675,24 @@ mod unit {
         let base = make_base();
 
         let mut a = base.clone();
-        a.merge(unsigned_delta(&base, DeltaOp::RevokeCredential { credential_id: "cred-A".to_owned() }, ts(10, 1))).unwrap();
+        a.merge(unsigned_delta(
+            &base,
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-A".to_owned(),
+            },
+            ts(10, 1),
+        ))
+        .unwrap();
 
         let mut b = base.clone();
-        b.merge(unsigned_delta(&base, DeltaOp::RevokeCredential { credential_id: "cred-B".to_owned() }, ts(20, 2))).unwrap();
+        b.merge(unsigned_delta(
+            &base,
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-B".to_owned(),
+            },
+            ts(20, 2),
+        ))
+        .unwrap();
 
         let mut ab = a.clone();
         ab.merge_state(b.clone()).unwrap();
@@ -675,7 +711,14 @@ mod unit {
     fn revocation_gset_idempotent() {
         let base = make_base();
         let mut a = base.clone();
-        a.merge(unsigned_delta(&base, DeltaOp::RevokeCredential { credential_id: "cred-1".to_owned() }, ts(10, 1))).unwrap();
+        a.merge(unsigned_delta(
+            &base,
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-1".to_owned(),
+            },
+            ts(10, 1),
+        ))
+        .unwrap();
 
         let before = serde_json::to_string(&a.resolve().unwrap()).unwrap();
         let mut merged = a.clone();
@@ -694,10 +737,26 @@ mod unit {
         let base = make_base();
 
         let mut a = base.clone();
-        a.merge(unsigned_delta(&base, DeltaOp::RotateKey { seq: 1, key_ref: "key-1".to_owned() }, ts(10, 1))).unwrap();
+        a.merge(unsigned_delta(
+            &base,
+            DeltaOp::RotateKey {
+                seq: 1,
+                key_ref: "key-1".to_owned(),
+            },
+            ts(10, 1),
+        ))
+        .unwrap();
 
         let mut b = base.clone();
-        b.merge(unsigned_delta(&base, DeltaOp::RotateKey { seq: 2, key_ref: "key-2".to_owned() }, ts(20, 2))).unwrap();
+        b.merge(unsigned_delta(
+            &base,
+            DeltaOp::RotateKey {
+                seq: 2,
+                key_ref: "key-2".to_owned(),
+            },
+            ts(20, 2),
+        ))
+        .unwrap();
 
         let mut ab = a.clone();
         ab.merge_state(b.clone()).unwrap();
@@ -717,7 +776,15 @@ mod unit {
     fn active_key_max_register_idempotent() {
         let base = make_base();
         let mut a = base.clone();
-        a.merge(unsigned_delta(&base, DeltaOp::RotateKey { seq: 3, key_ref: "key-3".to_owned() }, ts(30, 1))).unwrap();
+        a.merge(unsigned_delta(
+            &base,
+            DeltaOp::RotateKey {
+                seq: 3,
+                key_ref: "key-3".to_owned(),
+            },
+            ts(30, 1),
+        ))
+        .unwrap();
 
         let before = serde_json::to_string(&a.resolve().unwrap()).unwrap();
         let mut merged = a.clone();
@@ -739,24 +806,29 @@ mod unit {
 
         // Add key-1 to both replicas.
         let mut shared = base.clone();
-        shared.merge(unsigned_delta(
-            &base,
-            DeltaOp::AddVerificationMethod {
-                id: key1_id.clone(),
-                public_key_multibase: "zKey1".to_owned(),
-                suite_type: did_crdt::core::delta::SuiteType::default(),
-                relationships: did_crdt::core::delta::default_relationships(),
-            },
-            ts(5, 1),
-        )).unwrap();
+        shared
+            .merge(unsigned_delta(
+                &base,
+                DeltaOp::AddVerificationMethod {
+                    id: key1_id.clone(),
+                    public_key_multibase: "zKey1".to_owned(),
+                    suite_type: did_crdt::core::delta::SuiteType::default(),
+                    relationships: did_crdt::core::delta::default_relationships(),
+                },
+                ts(5, 1),
+            ))
+            .unwrap();
 
         // Replica A: revoke key-0.
         let mut a = shared.clone();
         a.merge(unsigned_delta(
             &shared,
-            DeltaOp::RevokeVerificationMethod { key_id: key0.clone() },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: key0.clone(),
+            },
             ts(10, 1),
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Replica B: add a service.
         let mut b = shared.clone();
@@ -768,7 +840,8 @@ mod unit {
                 endpoint: "https://b.example.com".to_owned(),
             },
             ts(20, 2),
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Merge in both orders.
         let mut ab = a.clone();
@@ -806,12 +879,16 @@ mod unit {
                 relationships: did_crdt::core::delta::default_relationships(),
             },
             ts(5, 1),
-        )).unwrap();
+        ))
+        .unwrap();
         a.merge(unsigned_delta(
             &a,
-            DeltaOp::RevokeVerificationMethod { key_id: key0.clone() },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: key0.clone(),
+            },
             ts(10, 1),
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Replica B: pristine (only genesis key, no revocation).
         let b = base.clone();
@@ -839,12 +916,16 @@ mod unit {
                 relationships: did_crdt::core::delta::default_relationships(),
             },
             ts(5, 1),
-        )).unwrap();
+        ))
+        .unwrap();
         a.merge(unsigned_delta(
             &a,
-            DeltaOp::RevokeVerificationMethod { key_id: key0.clone() },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: key0.clone(),
+            },
             ts(10, 1),
-        )).unwrap();
+        ))
+        .unwrap();
 
         let before = serde_json::to_string(&a.resolve().unwrap()).unwrap();
         let mut merged = a.clone();
@@ -883,7 +964,10 @@ mod unit {
         // Step 2: first rotation, seq=1 — must be authorised and applied.
         let r1 = unsigned_delta(
             &base,
-            DeltaOp::RotateKey { seq: 1, key_ref: "K2".to_owned() },
+            DeltaOp::RotateKey {
+                seq: 1,
+                key_ref: "K2".to_owned(),
+            },
             ts(10, 1),
         );
         check_authorisation(&r1, &doc).expect("seq=1 authorisation must pass");
@@ -892,7 +976,10 @@ mod unit {
         // Step 3: second rotation, seq=2 — must be authorised and applied.
         let r2 = unsigned_delta(
             &base,
-            DeltaOp::RotateKey { seq: 2, key_ref: "K3".to_owned() },
+            DeltaOp::RotateKey {
+                seq: 2,
+                key_ref: "K3".to_owned(),
+            },
             ts(20, 1),
         );
         check_authorisation(&r2, &doc).expect("seq=2 authorisation must pass");
@@ -902,7 +989,10 @@ mod unit {
         // the Max-Register keeps seq=2, so the active key is unchanged.
         let lower = unsigned_delta(
             &base,
-            DeltaOp::RotateKey { seq: 1, key_ref: "K4".to_owned() },
+            DeltaOp::RotateKey {
+                seq: 1,
+                key_ref: "K4".to_owned(),
+            },
             ts(30, 1),
         );
         check_authorisation(&lower, &doc)

@@ -77,7 +77,11 @@ impl Hlc {
     /// per-node id derived from a public key hash or UUID.
     pub fn new(now_ms: u64, node_id: u64) -> Self {
         Self {
-            last: HlcTimestamp { wall_ms: now_ms, logical: 0, node_id },
+            last: HlcTimestamp {
+                wall_ms: now_ms,
+                logical: 0,
+                node_id,
+            },
         }
     }
 
@@ -103,8 +107,16 @@ impl Hlc {
 
     fn advance_send(&mut self, now_ms: u64) -> HlcTimestamp {
         let wall = now_ms.max(self.last.wall_ms);
-        let logical = if wall == self.last.wall_ms { self.last.logical + 1 } else { 0 };
-        self.last = HlcTimestamp { wall_ms: wall, logical, node_id: self.last.node_id };
+        let logical = if wall == self.last.wall_ms {
+            self.last.logical + 1
+        } else {
+            0
+        };
+        self.last = HlcTimestamp {
+            wall_ms: wall,
+            logical,
+            node_id: self.last.node_id,
+        };
         self.last
     }
 
@@ -119,7 +131,11 @@ impl Hlc {
         } else {
             0
         };
-        self.last = HlcTimestamp { wall_ms: wall, logical, node_id: self.last.node_id };
+        self.last = HlcTimestamp {
+            wall_ms: wall,
+            logical,
+            node_id: self.last.node_id,
+        };
         self.last
     }
 }
@@ -206,7 +222,10 @@ mod tests {
         let t = hlc.send(&clock);
 
         assert_eq!(t.wall_ms, 5_000, "wall must not regress");
-        assert!(t.logical > 0, "logical must be positive when wall is clamped");
+        assert!(
+            t.logical > 0,
+            "logical must be positive when wall is clamped"
+        );
     }
 
     #[test]
@@ -224,8 +243,11 @@ mod tests {
         let clock = ManualClock::new(1_000);
         let mut hlc = Hlc::new(1_000, 1);
 
-        let remote =
-            HlcTimestamp { wall_ms: 9_000, logical: 0, node_id: 2 };
+        let remote = HlcTimestamp {
+            wall_ms: 9_000,
+            logical: 0,
+            node_id: 2,
+        };
         let ts = hlc.recv(remote, &clock);
 
         assert_eq!(ts.wall_ms, 9_000);
@@ -238,7 +260,11 @@ mod tests {
         let mut hlc = Hlc::new(5_000, 1);
         hlc.send(&clock); // logical = 1
 
-        let remote = HlcTimestamp { wall_ms: 5_000, logical: 3, node_id: 2 };
+        let remote = HlcTimestamp {
+            wall_ms: 5_000,
+            logical: 3,
+            node_id: 2,
+        };
         let ts = hlc.recv(remote, &clock);
 
         assert_eq!(ts.wall_ms, 5_000);
@@ -253,7 +279,11 @@ mod tests {
         let mut hlc = Hlc::new(8_000, 1);
         hlc.send(&clock); // logical = 1
 
-        let remote = HlcTimestamp { wall_ms: 5_000, logical: 99, node_id: 2 };
+        let remote = HlcTimestamp {
+            wall_ms: 5_000,
+            logical: 99,
+            node_id: 2,
+        };
         let ts = hlc.recv(remote, &clock);
 
         assert_eq!(ts.wall_ms, 8_000);
@@ -266,7 +296,11 @@ mod tests {
         let mut hlc = Hlc::new(3_000, 1);
         let local_before = hlc.send(&clock);
 
-        let remote = HlcTimestamp { wall_ms: 3_000, logical: 5, node_id: 2 };
+        let remote = HlcTimestamp {
+            wall_ms: 3_000,
+            logical: 5,
+            node_id: 2,
+        };
         let merged = hlc.recv(remote, &clock);
 
         assert!(merged > local_before, "merged must exceed local");
@@ -277,7 +311,11 @@ mod tests {
     fn recv_preserves_node_id() {
         let clock = ManualClock::new(1_000);
         let mut hlc = Hlc::new(1_000, 77);
-        let remote = HlcTimestamp { wall_ms: 2_000, logical: 0, node_id: 99 };
+        let remote = HlcTimestamp {
+            wall_ms: 2_000,
+            logical: 0,
+            node_id: 99,
+        };
         let ts = hlc.recv(remote, &clock);
         assert_eq!(ts.node_id, 77, "node_id must come from local clock");
     }
@@ -286,10 +324,26 @@ mod tests {
 
     #[test]
     fn timestamps_ordered_by_wall_then_logical_then_node() {
-        let a = HlcTimestamp { wall_ms: 1, logical: 0, node_id: 0 };
-        let b = HlcTimestamp { wall_ms: 2, logical: 0, node_id: 0 };
-        let c = HlcTimestamp { wall_ms: 2, logical: 1, node_id: 0 };
-        let d = HlcTimestamp { wall_ms: 2, logical: 1, node_id: 1 };
+        let a = HlcTimestamp {
+            wall_ms: 1,
+            logical: 0,
+            node_id: 0,
+        };
+        let b = HlcTimestamp {
+            wall_ms: 2,
+            logical: 0,
+            node_id: 0,
+        };
+        let c = HlcTimestamp {
+            wall_ms: 2,
+            logical: 1,
+            node_id: 0,
+        };
+        let d = HlcTimestamp {
+            wall_ms: 2,
+            logical: 1,
+            node_id: 1,
+        };
 
         assert!(a < b);
         assert!(b < c);

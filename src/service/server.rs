@@ -63,6 +63,22 @@ pub struct ServerConfig {
     /// bootstrap DIDs they are asked to resolve (CON-006 §admission control).
     /// Env: `REPLICATE_ALL=true`.
     pub replicate_all: bool,
+
+    /// This node's stable identity, as it appears in a Path-B resolver closure.
+    ///
+    /// A verifier applying a two-resolver union needs to say WHICH node reported
+    /// what — otherwise two answers from one operator are indistinguishable from
+    /// two independently operated ones, and the union asserts nothing. So this
+    /// is configuration rather than something derived: it names an operator's
+    /// deployment, and only the operator knows that.
+    ///
+    /// `None` means the node does not claim one, and the property is then
+    /// **omitted** from the resolution metadata rather than reported empty. An
+    /// absent property says "not stated"; an empty string would be a claim to
+    /// a name that is blank.
+    ///
+    /// Env: `RESOLVER_ID` (e.g. `did.anuna.io`).
+    pub resolver_id: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -78,6 +94,10 @@ impl Default for ServerConfig {
             resolve_timeout_ms: 10_000,
             dht_lookup_timeout_ms: 5_000,
             replicate_all: false,
+            // Unset by default: a node that has not been told who it is does not
+            // invent a name, and the metadata property is omitted rather than
+            // carrying one nobody chose.
+            resolver_id: None,
         }
     }
 }
@@ -99,6 +119,9 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     /// Total timeout for cold-start DID resolution.
     pub resolve_timeout: Duration,
+    /// This node's stable identity for Path-B resolution metadata, if it claims
+    /// one. Carried on the state because the handler projects it per response.
+    pub resolver_id: Option<String>,
 }
 
 impl AppState {
@@ -112,6 +135,7 @@ impl AppState {
             dht: None,
             metrics: Arc::new(Metrics::new()),
             resolve_timeout: Duration::from_millis(10_000),
+            resolver_id: None,
         }
     }
 }
@@ -178,9 +202,8 @@ impl Server {
             };
 
             let topic = topic_for(b"did-crdt/v1");
-            let node =
-                LiveNode::bind(topic, state.docs.clone(), dht.clone(), config.replicate_all)
-                    .await?;
+            let node = LiveNode::bind(topic, state.docs.clone(), dht.clone(), config.replicate_all)
+                .await?;
             if config.peers.is_empty() {
                 node.seed().await?;
             } else {
@@ -200,7 +223,10 @@ impl Server {
             eprintln!("did-crdt: iroh node id: {node_id}");
             let node_addr = node.node_addr().await.unwrap_or(iroh::net::NodeAddr {
                 node_id,
-                info: iroh::net::AddrInfo { relay_url: None, direct_addresses: Default::default() },
+                info: iroh::net::AddrInfo {
+                    relay_url: None,
+                    direct_addresses: Default::default(),
+                },
             });
             for socket in &node_addr.info.direct_addresses {
                 eprintln!("did-crdt: peer string: {node_id}@{socket}");
@@ -222,11 +248,13 @@ impl Server {
                 });
                 // Spawn the periodic refresh (trigger 3); it re-resolves the
                 // node address each cycle so address changes propagate.
-                let _refresh =
-                    d.clone().spawn_refresh_task(state.docs.clone(), node.endpoint());
+                let _refresh = d
+                    .clone()
+                    .spawn_refresh_task(state.docs.clone(), node.endpoint());
             }
 
             state.resolve_timeout = Duration::from_millis(config.resolve_timeout_ms);
+            state.resolver_id = config.resolver_id.clone();
 
             let handle = node.spawn();
             tokio::spawn(async move {
@@ -290,7 +318,11 @@ fn tracing_log(config: &ServerConfig) {
     eprintln!(
         "did-crdt service listening on {} (peers: {}, storage: {})",
         config.listen_addr,
-        if config.peers.is_empty() { "none".to_owned() } else { config.peers.join(", ") },
+        if config.peers.is_empty() {
+            "none".to_owned()
+        } else {
+            config.peers.join(", ")
+        },
         config
             .storage_path
             .as_deref()
@@ -364,16 +396,22 @@ mod tests {
 
     #[tokio::test]
     async fn create_resolve_submit_delta_round_trip() {
+        use crate::core::{
+            delta::{DeltaOp, SignedDelta, SigningKey},
+            hlc::HlcTimestamp,
+        };
         use axum::body::to_bytes;
         use base64ct::{Base64UrlUnpadded, Encoding as _};
-        use crate::core::{delta::{DeltaOp, SignedDelta, SigningKey}, hlc::HlcTimestamp};
 
         // Use a real Ed25519 keypair so verify_signature passes at the Tier 1
         // trust boundary.  The public key is encoded as multibase base64url
         // (`u` prefix, no padding) as required by the document model.
         let raw = [0xBBu8; 32];
         let sk = ed25519_dalek::SigningKey::from_bytes(&raw);
-        let pk_mb = format!("u{}", Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
 
         let state = AppState::new();
         let app = build_router(state);
@@ -407,19 +445,24 @@ mod tests {
         //    so unsigned deltas on active documents are rejected with 403.
         let did = did_str.parse::<crate::core::did::Did>().unwrap();
         let node_id = crate::core::validate::node_id_from_pubkey(sk.verifying_key().as_bytes());
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 1, node_id };
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 1,
+            node_id,
+        };
         let signer = format!("{did}#key-0");
         let signing_key = SigningKey::Ed25519(sk);
         // Ground the delta on the document's current frontier (SPEC-036). Genesis
         // derivation is deterministic, so a client (here, the test) can recompute
         // the genesis hash from the public key. Exposing the live frontier via the
         // API is a follow-up (SPEC-036 §1a).
-        let (_ref_doc, genesis_delta) =
-            crate::core::document::Document::new(&pk_mb).unwrap();
+        let (_ref_doc, genesis_delta) = crate::core::document::Document::new(&pk_mb).unwrap();
         let parents = vec![genesis_delta.content_hash().unwrap()];
         let delta = SignedDelta::new_with_parents(
             did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-test".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-test".to_owned(),
+            },
             ts,
             parents,
             signer,
@@ -440,13 +483,19 @@ mod tests {
     #[tokio::test]
     async fn submit_delta_unsigned_rejected_on_active_document() {
         // FINDING-001: unsigned deltas on active documents must be rejected 403.
+        use crate::core::{
+            delta::{DeltaOp, SignedDelta},
+            hlc::HlcTimestamp,
+        };
         use axum::body::to_bytes;
         use base64ct::{Base64UrlUnpadded, Encoding as _};
-        use crate::core::{delta::{DeltaOp, SignedDelta}, hlc::HlcTimestamp};
 
         let raw = [0xCCu8; 32];
         let sk = ed25519_dalek::SigningKey::from_bytes(&raw);
-        let pk_mb = format!("u{}", Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
 
         let state = AppState::new();
         let app = build_router(state);
@@ -467,11 +516,17 @@ mod tests {
 
         // Submit an unsigned delta — must be rejected.
         let did = did_str.parse::<crate::core::did::Did>().unwrap();
-        let ts = HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        };
         let signer = format!("{did}#key-0");
         let delta = SignedDelta::unsigned(
             did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-evil".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-evil".to_owned(),
+            },
             ts,
             signer,
         );

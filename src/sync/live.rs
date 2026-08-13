@@ -90,7 +90,14 @@ impl LiveNode {
         } else {
             BootstrapPolicy::solicited_only()
         };
-        Ok(Self { endpoint, gossip, topic, docs, dht, policy })
+        Ok(Self {
+            endpoint,
+            gossip,
+            topic,
+            docs,
+            dht,
+            policy,
+        })
     }
 
     /// The underlying iroh endpoint (for address refresh in the DHT task).
@@ -150,9 +157,14 @@ impl LiveNode {
                 .ok_or_else(|| anyhow::anyhow!("announce: untracked DID {did}"))?;
             *doc.content_hash()?.as_bytes()
         };
-        let msg =
-            SyncMessage::Announce { did: did.clone(), hash, clock: HlcTimestamp::default() };
-        self.gossip.broadcast(self.topic, Bytes::from(serde_json::to_vec(&msg)?)).await?;
+        let msg = SyncMessage::Announce {
+            did: did.clone(),
+            hash,
+            clock: HlcTimestamp::default(),
+        };
+        self.gossip
+            .broadcast(self.topic, Bytes::from(serde_json::to_vec(&msg)?))
+            .await?;
         Ok(())
     }
 
@@ -227,7 +239,10 @@ impl LiveNode {
                 let per_peer = COLD_START_PER_PEER.min(remaining);
                 let attempt = async {
                     self.connect(peer.clone()).await?;
-                    let req = SyncMessage::Request { did: did.clone(), frontier: vec![] };
+                    let req = SyncMessage::Request {
+                        did: did.clone(),
+                        frontier: vec![],
+                    };
                     let bytes = Bytes::from(serde_json::to_vec(&req)?);
                     // Broadcast the REQUEST, then poll for the bootstrap;
                     // re-broadcast each interval in case the first send raced
@@ -260,7 +275,9 @@ impl LiveNode {
             tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
         }
 
-        Err(anyhow::anyhow!("cold-start bootstrap failed for {did}: {last_failure}"))
+        Err(anyhow::anyhow!(
+            "cold-start bootstrap failed for {did}: {last_failure}"
+        ))
     }
 
     /// Spawn the background sync loop: accept incoming gossip connections, and
@@ -362,7 +379,10 @@ mod tests {
         const SEED: [u8; 32] = [11u8; 32];
         let dk = DalekKey::from_bytes(&SEED);
         let nid = node_id_from_pubkey(dk.verifying_key().as_bytes());
-        let pk_mb = format!("u{}", Base64UrlUnpadded::encode_string(dk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(dk.verifying_key().as_bytes())
+        );
         let sk = SigningKey::Ed25519(dk);
 
         let (mut doc, _) = Document::new(&pk_mb).expect("new() must succeed");
@@ -370,8 +390,14 @@ mod tests {
         for (i, cred) in updates.iter().enumerate() {
             let d = SignedDelta::new_with_parents(
                 doc.did.clone(),
-                DeltaOp::RevokeCredential { credential_id: (*cred).to_owned() },
-                HlcTimestamp { wall_ms: (i as u64 + 1) * 10, logical: 0, node_id: nid },
+                DeltaOp::RevokeCredential {
+                    credential_id: (*cred).to_owned(),
+                },
+                HlcTimestamp {
+                    wall_ms: (i as u64 + 1) * 10,
+                    logical: 0,
+                    node_id: nid,
+                },
                 doc.frontier(),
                 signer.clone(),
                 &sk,
@@ -402,8 +428,12 @@ mod tests {
         let a_docs = store(a_doc);
         let b_docs = store(b_doc);
 
-        let a = LiveNode::bind(topic, a_docs.clone(), None, false).await.unwrap();
-        let b = LiveNode::bind(topic, b_docs.clone(), None, false).await.unwrap();
+        let a = LiveNode::bind(topic, a_docs.clone(), None, false)
+            .await
+            .unwrap();
+        let b = LiveNode::bind(topic, b_docs.clone(), None, false)
+            .await
+            .unwrap();
 
         let _a_task = a.spawn();
         let _b_task = b.spawn();
@@ -427,6 +457,9 @@ mod tests {
         })
         .await;
 
-        assert!(converged.is_ok(), "node B did not converge to A over live iroh gossip");
+        assert!(
+            converged.is_ok(),
+            "node B did not converge to A over live iroh gossip"
+        );
     }
 }

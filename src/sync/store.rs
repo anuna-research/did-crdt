@@ -75,7 +75,9 @@ impl BlobStore<MemStore> {
     /// Suitable for unit tests and short-lived processes.  All blobs are lost
     /// when the store is dropped.
     pub fn new_in_memory() -> Self {
-        Self { inner: MemStore::new() }
+        Self {
+            inner: MemStore::new(),
+        }
     }
 }
 
@@ -110,7 +112,13 @@ impl<S: IrohStore> BlobStore<S> {
         // Pin under a stable tag so GC cannot evict this snapshot.
         let tag = did_tag(doc.did.as_str());
         self.inner
-            .set_tag(tag, Some(HashAndFormat { hash, format: BlobFormat::Raw }))
+            .set_tag(
+                tag,
+                Some(HashAndFormat {
+                    hash,
+                    format: BlobFormat::Raw,
+                }),
+            )
             .await?;
 
         Ok(hash)
@@ -238,7 +246,11 @@ mod tests {
         );
         // The blob hash is deterministic for the same serialised document.
         let iroh_hash_again = store.save(&doc).await.unwrap();
-        assert_eq!(iroh_hash.as_bytes(), iroh_hash_again.as_bytes(), "blob hash is stable");
+        assert_eq!(
+            iroh_hash.as_bytes(),
+            iroh_hash_again.as_bytes(),
+            "blob hash is stable"
+        );
     }
 
     // ── tag pinning / latest_hash ─────────────────────────────────────────────
@@ -263,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn latest_hash_updates_after_second_save() {
-        use crate::core::{delta::DeltaOp, hlc::HlcTimestamp, delta::SignedDelta};
+        use crate::core::{delta::DeltaOp, delta::SignedDelta, hlc::HlcTimestamp};
 
         let store = make_store();
         let mut doc = make_doc();
@@ -272,10 +284,16 @@ mod tests {
 
         // Mutate the document so a second save produces a different hash.
         let signer = doc.verification_methods.entries()[0].id.clone();
-        let ts = HlcTimestamp { wall_ms: 100, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 100,
+            logical: 0,
+            node_id: 1,
+        };
         let mut delta = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-001".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-001".to_owned(),
+            },
             ts,
             signer,
         );
@@ -283,7 +301,10 @@ mod tests {
         doc.merge(delta).unwrap();
 
         let hash_v2 = store.save(&doc).await.unwrap();
-        assert_ne!(hash_v1, hash_v2, "mutated document must produce different hash");
+        assert_ne!(
+            hash_v1, hash_v2,
+            "mutated document must produce different hash"
+        );
 
         // The tag should now point at the newer hash.
         let pinned = store.latest_hash(&doc.did).await.unwrap();

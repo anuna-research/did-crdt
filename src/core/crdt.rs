@@ -20,7 +20,7 @@ use crdts::{CvRDT, GSet, LWWReg};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::delta::{SuiteType, VerificationRelationship, default_relationships};
+use crate::core::delta::{default_relationships, SuiteType, VerificationRelationship};
 use crate::core::hlc::HlcTimestamp;
 
 /// A node identifier — the lower 64 bits of a node's public-key hash, carried
@@ -73,7 +73,12 @@ impl VerificationMethods {
         suite_type: SuiteType,
         relationships: Vec<VerificationRelationship>,
     ) {
-        self.0.insert(VerificationMethodEntry { id, public_key_multibase, suite_type, relationships });
+        self.0.insert(VerificationMethodEntry {
+            id,
+            public_key_multibase,
+            suite_type,
+            relationships,
+        });
     }
 
     /// Returns `true` if an entry whose `id` field matches `id` exists.
@@ -227,7 +232,10 @@ struct ServiceEndpointsRepr {
 }
 
 impl Serialize for ServiceEndpoints {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         ServiceEndpointsRepr {
             live: self.live.iter().map(|(d, e)| (*d, e.clone())).collect(),
             context: self.context.iter().map(|(n, d)| (*n, *d)).collect(),
@@ -237,7 +245,9 @@ impl Serialize for ServiceEndpoints {
 }
 
 impl<'de> Deserialize<'de> for ServiceEndpoints {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let repr = ServiceEndpointsRepr::deserialize(deserializer)?;
         Ok(ServiceEndpoints {
             live: repr.live.into_iter().collect(),
@@ -359,7 +369,10 @@ impl DocumentData {
     pub fn set(&mut self, key: String, value: Value, timestamp: HlcTimestamp) {
         self.0
             .entry(key)
-            .or_insert_with(|| LWWReg { val: Value::Null, marker: HlcTimestamp::default() })
+            .or_insert_with(|| LWWReg {
+                val: Value::Null,
+                marker: HlcTimestamp::default(),
+            })
             .update(value, timestamp);
     }
 
@@ -381,7 +394,10 @@ impl DocumentData {
         for (key, reg) in other.0 {
             self.0
                 .entry(key)
-                .or_insert_with(|| LWWReg { val: Value::Null, marker: HlcTimestamp::default() })
+                .or_insert_with(|| LWWReg {
+                    val: Value::Null,
+                    marker: HlcTimestamp::default(),
+                })
                 .update(reg.val, reg.marker);
         }
     }
@@ -405,7 +421,10 @@ pub struct ActiveKeyMarker {
 impl ActiveKeyMarker {
     /// Construct a marker by hashing `key_ref` with BLAKE3.
     pub fn new(seq: u64, key_ref: &str) -> Self {
-        Self { seq, key_hash: *blake3::hash(key_ref.as_bytes()).as_bytes() }
+        Self {
+            seq,
+            key_hash: *blake3::hash(key_ref.as_bytes()).as_bytes(),
+        }
     }
 }
 
@@ -419,7 +438,10 @@ pub struct ActiveKey(LWWReg<Option<String>, ActiveKeyMarker>);
 
 impl Default for ActiveKey {
     fn default() -> Self {
-        Self(LWWReg { val: None, marker: ActiveKeyMarker::default() })
+        Self(LWWReg {
+            val: None,
+            marker: ActiveKeyMarker::default(),
+        })
     }
 }
 
@@ -499,7 +521,12 @@ mod tests {
     #[test]
     fn gset_insert_and_contains() {
         let mut vm = VerificationMethods::new();
-        vm.insert("did:crdt:aa#key-1".into(), "zAbc".into(), SuiteType::default(), default_relationships());
+        vm.insert(
+            "did:crdt:aa#key-1".into(),
+            "zAbc".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
         assert!(vm.contains_id("did:crdt:aa#key-1"));
         assert!(!vm.contains_id("did:crdt:aa#key-2"));
     }
@@ -507,10 +534,20 @@ mod tests {
     #[test]
     fn gset_merge_union() {
         let mut a = VerificationMethods::new();
-        a.insert("k1".into(), "pub1".into(), SuiteType::default(), default_relationships());
+        a.insert(
+            "k1".into(),
+            "pub1".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
 
         let mut b = VerificationMethods::new();
-        b.insert("k2".into(), "pub2".into(), SuiteType::default(), default_relationships());
+        b.insert(
+            "k2".into(),
+            "pub2".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
 
         a.merge(b);
         assert!(a.contains_id("k1"));
@@ -520,7 +557,12 @@ mod tests {
     #[test]
     fn gset_merge_idempotent() {
         let mut a = VerificationMethods::new();
-        a.insert("k1".into(), "pub1".into(), SuiteType::default(), default_relationships());
+        a.insert(
+            "k1".into(),
+            "pub1".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
         let snapshot = a.clone();
 
         a.merge(snapshot);
@@ -530,7 +572,12 @@ mod tests {
     #[test]
     fn gset_grow_only_no_remove() {
         let mut a = VerificationMethods::new();
-        a.insert("k1".into(), "pub1".into(), SuiteType::default(), default_relationships());
+        a.insert(
+            "k1".into(),
+            "pub1".into(),
+            SuiteType::default(),
+            default_relationships(),
+        );
 
         let mut b = VerificationMethods::new();
         // B merges A, then A is empty-merged — B still has k1
@@ -615,7 +662,11 @@ mod tests {
 
     /// A dot at wall-clock `w` from node `n` (logical 0).
     fn dot(w: u64, n: u64) -> Dot {
-        HlcTimestamp { wall_ms: w, logical: 0, node_id: n }
+        HlcTimestamp {
+            wall_ms: w,
+            logical: 0,
+            node_id: n,
+        }
     }
 
     #[test]
@@ -671,7 +722,10 @@ mod tests {
         b.apply_remove(&[dot_b], dot(2, 2));
 
         a.merge(b);
-        assert!(a.contains_id("svc-1"), "concurrent add must win over a remove that never saw it");
+        assert!(
+            a.contains_id("svc-1"),
+            "concurrent add must win over a remove that never saw it"
+        );
     }
 
     #[test]
@@ -687,7 +741,10 @@ mod tests {
         b.apply_remove(&[dot_a], dot(2, 2)); // …and removed it.
 
         a.merge(b);
-        assert!(!a.contains_id("svc-1"), "a remove that observed the add must win");
+        assert!(
+            !a.contains_id("svc-1"),
+            "a remove that observed the add must win"
+        );
     }
 
     #[test]
@@ -713,7 +770,11 @@ mod tests {
     // ── DocumentData ──────────────────────────────────────────────────────────
 
     fn ts(wall: u64) -> HlcTimestamp {
-        HlcTimestamp { wall_ms: wall, logical: 0, node_id: 0 }
+        HlcTimestamp {
+            wall_ms: wall,
+            logical: 0,
+            node_id: 0,
+        }
     }
 
     #[test]

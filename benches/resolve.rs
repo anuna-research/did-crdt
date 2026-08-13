@@ -18,7 +18,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use did_crdt::{
     core::{
-        delta::{DeltaOp, SignedDelta, SuiteType, default_relationships},
+        delta::{default_relationships, DeltaOp, SignedDelta, SuiteType},
         hlc::HlcTimestamp,
     },
     Document,
@@ -27,11 +27,7 @@ use did_crdt::{
 // ── size buckets ──────────────────────────────────────────────────────────────
 
 /// (label, vm_count, svc_count) — matching OBS-002 bucket definitions.
-const SIZES: &[(&str, usize, usize)] = &[
-    ("small",  1,   1),
-    ("medium", 10,  10),
-    ("large",  100, 100),
-];
+const SIZES: &[(&str, usize, usize)] = &[("small", 1, 1), ("medium", 10, 10), ("large", 100, 100)];
 
 // ── fixture builder ───────────────────────────────────────────────────────────
 
@@ -42,7 +38,11 @@ fn build_doc(vm_count: usize, svc_count: usize) -> Document {
     let signer = format!("{}#key-0", doc.did);
 
     for i in 1..vm_count {
-        let ts = HlcTimestamp { wall_ms: i as u64 * 10, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: i as u64 * 10,
+            logical: 0,
+            node_id: 1,
+        };
         let op = DeltaOp::AddVerificationMethod {
             id: format!("{}#key-{}", doc.did, i),
             public_key_multibase: format!("zBenchKey{}", i),
@@ -51,11 +51,16 @@ fn build_doc(vm_count: usize, svc_count: usize) -> Document {
         };
         let mut d = SignedDelta::unsigned(doc.did.clone(), op, ts, signer.clone());
         d.parents = doc.frontier();
-        doc.merge(d).expect("merge VM must succeed during fixture build");
+        doc.merge(d)
+            .expect("merge VM must succeed during fixture build");
     }
 
     for i in 0..svc_count {
-        let ts = HlcTimestamp { wall_ms: 10_000 + i as u64 * 10, logical: 0, node_id: 1 };
+        let ts = HlcTimestamp {
+            wall_ms: 10_000 + i as u64 * 10,
+            logical: 0,
+            node_id: 1,
+        };
         let op = DeltaOp::AddServiceEndpoint {
             id: format!("{}#svc-{}", doc.did, i),
             service_type: "LinkedDomains".to_owned(),
@@ -63,7 +68,8 @@ fn build_doc(vm_count: usize, svc_count: usize) -> Document {
         };
         let mut d = SignedDelta::unsigned(doc.did.clone(), op, ts, signer.clone());
         d.parents = doc.frontier();
-        doc.merge(d).expect("merge service must succeed during fixture build");
+        doc.merge(d)
+            .expect("merge service must succeed during fixture build");
     }
 
     doc

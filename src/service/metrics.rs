@@ -65,7 +65,9 @@ impl Metrics {
             &["delta_field"],
         )
         .expect("convergence_latency metric must be valid");
-        registry.register(Box::new(convergence_latency.clone())).expect("register");
+        registry
+            .register(Box::new(convergence_latency.clone()))
+            .expect("register");
 
         // OBS-002 resolution latency
         let resolution_latency = HistogramVec::new(
@@ -77,29 +79,45 @@ impl Metrics {
             &["document_size_bucket"],
         )
         .expect("resolution_latency metric must be valid");
-        registry.register(Box::new(resolution_latency.clone())).expect("register");
+        registry
+            .register(Box::new(resolution_latency.clone()))
+            .expect("register");
 
         // OBS-003 deltas merged total
         let deltas_merged = IntCounterVec::new(
-            Opts::new("did_crdt_deltas_merged_total", "Total deltas merged, by outcome"),
+            Opts::new(
+                "did_crdt_deltas_merged_total",
+                "Total deltas merged, by outcome",
+            ),
             &["outcome"],
         )
         .expect("deltas_merged metric must be valid");
-        registry.register(Box::new(deltas_merged.clone())).expect("register");
+        registry
+            .register(Box::new(deltas_merged.clone()))
+            .expect("register");
 
         // OBS-004 delta rejections total
         let delta_rejections = IntCounterVec::new(
-            Opts::new("did_crdt_delta_rejections_total", "Total deltas rejected, by reason"),
+            Opts::new(
+                "did_crdt_delta_rejections_total",
+                "Total deltas rejected, by reason",
+            ),
             &["reason"],
         )
         .expect("delta_rejections metric must be valid");
-        registry.register(Box::new(delta_rejections.clone())).expect("register");
+        registry
+            .register(Box::new(delta_rejections.clone()))
+            .expect("register");
 
         // OBS-005 peer count
-        let peer_count =
-            IntGauge::new("did_crdt_peer_count", "Number of connected iroh-gossip peers")
-                .expect("peer_count metric must be valid");
-        registry.register(Box::new(peer_count.clone())).expect("register");
+        let peer_count = IntGauge::new(
+            "did_crdt_peer_count",
+            "Number of connected iroh-gossip peers",
+        )
+        .expect("peer_count metric must be valid");
+        registry
+            .register(Box::new(peer_count.clone()))
+            .expect("register");
 
         // OBS-006 state size bytes
         let state_size = IntGaugeVec::new(
@@ -110,7 +128,9 @@ impl Metrics {
             &["did"],
         )
         .expect("state_size metric must be valid");
-        registry.register(Box::new(state_size.clone())).expect("register");
+        registry
+            .register(Box::new(state_size.clone()))
+            .expect("register");
 
         Self {
             convergence_latency,
@@ -128,7 +148,9 @@ impl Metrics {
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
         let mut buf = Vec::new();
-        encoder.encode(&metric_families, &mut buf).unwrap_or_default();
+        encoder
+            .encode(&metric_families, &mut buf)
+            .unwrap_or_default();
         String::from_utf8(buf).unwrap_or_default()
     }
 
@@ -152,7 +174,9 @@ impl Metrics {
     /// Increment the accepted-delta counter and update the state-size gauge.
     pub fn record_delta_accepted(&self, did_truncated: &str, state_bytes: i64) {
         self.deltas_merged.with_label_values(&["accepted"]).inc();
-        self.state_size.with_label_values(&[did_truncated]).set(state_bytes);
+        self.state_size
+            .with_label_values(&[did_truncated])
+            .set(state_bytes);
     }
 
     /// Increment the rejected-delta counter for the given reason.
@@ -186,8 +210,8 @@ mod tests {
     #[test]
     fn obs_002_resolution_latency_observe_resolution() {
         let m = Metrics::new();
-        m.observe_resolution(0.001, 5);   // small
-        m.observe_resolution(0.002, 50);  // medium
+        m.observe_resolution(0.001, 5); // small
+        m.observe_resolution(0.002, 50); // medium
         m.observe_resolution(0.003, 200); // large
         let output = m.encode();
         assert!(output.contains("did_crdt_resolution_latency_seconds"));

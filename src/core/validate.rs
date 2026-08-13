@@ -23,9 +23,9 @@
 use base64ct::{Base64UrlUnpadded, Encoding as _};
 use ed25519_dalek::Verifier as _;
 
-use crate::core::delta::{DeltaOp, SignedDelta, SuiteType};
 #[cfg(test)]
 use crate::core::delta::default_relationships;
+use crate::core::delta::{DeltaOp, SignedDelta, SuiteType};
 use crate::core::document::Document;
 use crate::core::{Error, Result};
 
@@ -113,12 +113,16 @@ pub fn verify_signature(delta: &SignedDelta, doc: &Document) -> Result<()> {
     // Verify using the suite declared in the proof.
     match &delta.proof.suite {
         SuiteType::Ed25519Signature2020 => {
-            let key_arr: &[u8; 32] =
-                key_bytes.as_slice().try_into().map_err(|_| Error::InvalidSignature)?;
+            let key_arr: &[u8; 32] = key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidSignature)?;
             let vk = ed25519_dalek::VerifyingKey::from_bytes(key_arr)
                 .map_err(|_| Error::InvalidSignature)?;
-            let sig_arr: &[u8; 64] =
-                sig_bytes.as_slice().try_into().map_err(|_| Error::InvalidSignature)?;
+            let sig_arr: &[u8; 64] = sig_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidSignature)?;
             let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
             vk.verify(&input, &sig).map_err(|_| Error::InvalidSignature)
         }
@@ -142,8 +146,7 @@ pub fn node_id_from_pubkey(pubkey_bytes: &[u8]) -> u64 {
     let hash = blake3::hash(pubkey_bytes);
     let bytes: &[u8] = hash.as_bytes();
     u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ])
 }
 
@@ -196,12 +199,18 @@ pub fn check_authorisation(delta: &SignedDelta, doc: &Document) -> Result<()> {
                 "only AddVerificationMethod is permitted on a genesis document".to_owned(),
             ));
         }
-    } else if !doc.verification_methods.contains_id(&delta.proof.verification_method) {
+    } else if !doc
+        .verification_methods
+        .contains_id(&delta.proof.verification_method)
+    {
         return Err(Error::Unauthorised(format!(
             "signer key {} is not an authorised verification method",
             delta.proof.verification_method
         )));
-    } else if doc.revoked_verification_methods.contains(&delta.proof.verification_method) {
+    } else if doc
+        .revoked_verification_methods
+        .contains(&delta.proof.verification_method)
+    {
         return Err(Error::Unauthorised(format!(
             "signer key {} has been revoked",
             delta.proof.verification_method
@@ -240,8 +249,10 @@ mod tests {
     fn ed25519_doc() -> (Document, ed25519_dalek::SigningKey, String) {
         let raw = [0x42u8; 32];
         let sk = ed25519_dalek::SigningKey::from_bytes(&raw);
-        let pk_mb =
-            format!("u{}", Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes()));
+        let pk_mb = format!(
+            "u{}",
+            Base64UrlUnpadded::encode_string(sk.verifying_key().as_bytes())
+        );
         let (doc, _) = Document::new(&pk_mb).unwrap();
         let key_id = doc.verification_methods.entries()[0].id.clone();
         (doc, sk, key_id)
@@ -265,8 +276,10 @@ mod tests {
 
     fn secp256k1_doc() -> (Document, k256::ecdsa::SigningKey, String) {
         let sk = k256::ecdsa::SigningKey::from_bytes((&[0x33u8; 32]).into()).unwrap();
-        let pk_compressed =
-            k256::ecdsa::VerifyingKey::from(&sk).to_encoded_point(true).as_bytes().to_vec();
+        let pk_compressed = k256::ecdsa::VerifyingKey::from(&sk)
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec();
         let pk_mb = format!("u{}", Base64UrlUnpadded::encode_string(&pk_compressed));
         let (doc, _) = Document::new(&pk_mb).unwrap();
         let key_id = doc.verification_methods.entries()[0].id.clone();
@@ -274,7 +287,11 @@ mod tests {
     }
 
     fn ts() -> HlcTimestamp {
-        HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 1 }
+        HlcTimestamp {
+            wall_ms: 1_000,
+            logical: 0,
+            node_id: 1,
+        }
     }
 
     // ── verify_signature ──────────────────────────────────────────────────────
@@ -286,8 +303,14 @@ mod tests {
         let signing_key = SigningKey::Ed25519(sk);
         let delta = SignedDelta::new_genesis(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-1".to_owned() },
-            HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: nid },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-1".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: nid,
+            },
             key_id,
             &signing_key,
         )
@@ -302,8 +325,14 @@ mod tests {
         let signing_key = SigningKey::Secp256k1(sk);
         let delta = SignedDelta::new_genesis(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-2".to_owned() },
-            HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: nid },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-2".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: nid,
+            },
             key_id,
             &signing_key,
         )
@@ -318,8 +347,14 @@ mod tests {
         // Use an arbitrary node_id that doesn't match the key.
         let delta = SignedDelta::new_genesis(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-x".to_owned() },
-            HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: 999 },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-x".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: 999,
+            },
             key_id,
             &signing_key,
         )
@@ -333,7 +368,10 @@ mod tests {
     #[test]
     fn verify_empty_proof_value_passes_on_genesis_doc() {
         // A genesis document (no verification methods) must accept an unsigned delta.
-        use crate::core::crdt::{ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods, ServiceEndpoints, VerificationMethods};
+        use crate::core::crdt::{
+            ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods,
+            ServiceEndpoints, VerificationMethods,
+        };
         let (ref_doc, _, key_id) = ed25519_doc();
         let empty_doc = Document {
             did: ref_doc.did.clone(),
@@ -360,7 +398,10 @@ mod tests {
             ts(),
             key_id,
         );
-        assert!(verify_signature(&delta, &empty_doc).is_ok(), "unsigned genesis delta must pass");
+        assert!(
+            verify_signature(&delta, &empty_doc).is_ok(),
+            "unsigned genesis delta must pass"
+        );
     }
 
     #[test]
@@ -383,7 +424,11 @@ mod tests {
         let mut delta = SignedDelta::new_genesis(
             doc.did.clone(),
             DeltaOp::Deactivate,
-            HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: nid },
+            HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: nid,
+            },
             key_id,
             &signing_key,
         )
@@ -409,7 +454,11 @@ mod tests {
         let delta = SignedDelta::new_genesis(
             doc.did.clone(),
             DeltaOp::Deactivate,
-            HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: nid },
+            HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: nid,
+            },
             format!("{}#no-such-key", doc.did),
             &signing_key,
         )
@@ -430,12 +479,19 @@ mod tests {
         let delta = SignedDelta::new_genesis(
             doc.did.clone(),
             DeltaOp::Deactivate,
-            HlcTimestamp { wall_ms: 1_000, logical: 0, node_id: nid },
+            HlcTimestamp {
+                wall_ms: 1_000,
+                logical: 0,
+                node_id: nid,
+            },
             key_id,
             &signing_key,
         )
         .unwrap();
-        assert!(verify_signature(&delta, &doc).is_err(), "wrong key must fail");
+        assert!(
+            verify_signature(&delta, &doc).is_err(),
+            "wrong key must fail"
+        );
     }
 
     // ── check_authorisation ───────────────────────────────────────────────────
@@ -458,12 +514,7 @@ mod tests {
         );
         let (other, _) = Document::new(&other_pk_mb).unwrap();
         // Delta targets `other.did` — must be rejected by `doc`.
-        let delta = SignedDelta::unsigned(
-            other.did.clone(),
-            DeltaOp::Deactivate,
-            ts(),
-            key_id,
-        );
+        let delta = SignedDelta::unsigned(other.did.clone(), DeltaOp::Deactivate, ts(), key_id);
         assert!(
             check_authorisation(&delta, &doc).is_err(),
             "DID mismatch must be rejected"
@@ -482,8 +533,14 @@ mod tests {
         // Any subsequent delta should be rejected.
         let follow_up = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-9".to_owned() },
-            HlcTimestamp { wall_ms: 2_000, logical: 0, node_id: 1 },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-9".to_owned(),
+            },
+            HlcTimestamp {
+                wall_ms: 2_000,
+                logical: 0,
+                node_id: 1,
+            },
             key_id,
         );
         assert!(
@@ -510,7 +567,10 @@ mod tests {
     #[test]
     fn authorisation_genesis_allows_add_verification_method() {
         // An empty document (genesis state) accepts AddVerificationMethod from any signer.
-        use crate::core::crdt::{ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods, ServiceEndpoints, VerificationMethods};
+        use crate::core::crdt::{
+            ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods,
+            ServiceEndpoints, VerificationMethods,
+        };
         let (ref_doc, _, key_id) = ed25519_doc();
         let empty_doc = Document {
             did: ref_doc.did.clone(),
@@ -550,7 +610,10 @@ mod tests {
     // attacker permanently freeze or corrupt a DID before any key is registered.
 
     fn empty_doc_for(ref_doc: &Document) -> Document {
-        use crate::core::crdt::{ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods, ServiceEndpoints, VerificationMethods};
+        use crate::core::crdt::{
+            ActiveKey, Deactivated, DocumentData, Revocations, RevokedVerificationMethods,
+            ServiceEndpoints, VerificationMethods,
+        };
         Document {
             did: ref_doc.did.clone(),
             verification_methods: VerificationMethods::new(),
@@ -584,7 +647,10 @@ mod tests {
         let empty_doc = empty_doc_for(&ref_doc);
         let delta = SignedDelta::unsigned(
             ref_doc.did.clone(),
-            DeltaOp::RotateKey { seq: 1, key_ref: key_id.clone() },
+            DeltaOp::RotateKey {
+                seq: 1,
+                key_ref: key_id.clone(),
+            },
             ts(),
             key_id,
         );
@@ -600,7 +666,9 @@ mod tests {
         let empty_doc = empty_doc_for(&ref_doc);
         let delta = SignedDelta::unsigned(
             ref_doc.did.clone(),
-            DeltaOp::RevokeCredential { credential_id: "cred-x".to_owned() },
+            DeltaOp::RevokeCredential {
+                credential_id: "cred-x".to_owned(),
+            },
             ts(),
             key_id,
         );
@@ -616,7 +684,10 @@ mod tests {
         // seq=1 > current_seq=0 → must pass.
         let delta = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RotateKey { seq: 1, key_ref: key_id.clone() },
+            DeltaOp::RotateKey {
+                seq: 1,
+                key_ref: key_id.clone(),
+            },
             ts(),
             key_id,
         );
@@ -629,7 +700,10 @@ mod tests {
         // First rotation to seq=1.
         let mut r1 = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RotateKey { seq: 1, key_ref: key_id.clone() },
+            DeltaOp::RotateKey {
+                seq: 1,
+                key_ref: key_id.clone(),
+            },
             ts(),
             key_id.clone(),
         );
@@ -641,8 +715,15 @@ mod tests {
         // rejecting equal-seq rotations would leave concurrent replicas divergent.
         let r2 = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RotateKey { seq: 1, key_ref: key_id.clone() },
-            HlcTimestamp { wall_ms: 2_000, logical: 0, node_id: 1 },
+            DeltaOp::RotateKey {
+                seq: 1,
+                key_ref: key_id.clone(),
+            },
+            HlcTimestamp {
+                wall_ms: 2_000,
+                logical: 0,
+                node_id: 1,
+            },
             key_id,
         );
         assert!(
@@ -657,7 +738,10 @@ mod tests {
         // Advance to seq=5.
         let mut r = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RotateKey { seq: 5, key_ref: key_id.clone() },
+            DeltaOp::RotateKey {
+                seq: 5,
+                key_ref: key_id.clone(),
+            },
             ts(),
             key_id.clone(),
         );
@@ -669,14 +753,28 @@ mod tests {
         // parented on it. The ActiveKey Max-Register keeps the higher seq.
         let mut lower = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RotateKey { seq: 3, key_ref: key_id.clone() },
-            HlcTimestamp { wall_ms: 2_000, logical: 0, node_id: 1 },
+            DeltaOp::RotateKey {
+                seq: 3,
+                key_ref: key_id.clone(),
+            },
+            HlcTimestamp {
+                wall_ms: 2_000,
+                logical: 0,
+                node_id: 1,
+            },
             key_id,
         );
         lower.parents = doc.frontier();
-        assert!(check_authorisation(&lower, &doc).is_ok(), "lower-seq rotation must be admitted");
+        assert!(
+            check_authorisation(&lower, &doc).is_ok(),
+            "lower-seq rotation must be admitted"
+        );
         doc.merge(lower).unwrap();
-        assert_eq!(doc.active_key.seq(), 5, "Max-Register keeps the higher sequence");
+        assert_eq!(
+            doc.active_key.seq(),
+            5,
+            "Max-Register keeps the higher sequence"
+        );
     }
 
     // ── 2P-Set verification method revocation ────────────────────────────────
@@ -704,8 +802,14 @@ mod tests {
         // Revoke key-0 using key-1.
         let mut revoke = SignedDelta::unsigned(
             doc.did.clone(),
-            DeltaOp::RevokeVerificationMethod { key_id: key_id.clone() },
-            HlcTimestamp { wall_ms: 2_000, logical: 0, node_id: 1 },
+            DeltaOp::RevokeVerificationMethod {
+                key_id: key_id.clone(),
+            },
+            HlcTimestamp {
+                wall_ms: 2_000,
+                logical: 0,
+                node_id: 1,
+            },
             key1_id,
         );
         revoke.parents = doc.frontier();
@@ -715,7 +819,11 @@ mod tests {
         let delta = SignedDelta::unsigned(
             doc.did.clone(),
             DeltaOp::Deactivate,
-            HlcTimestamp { wall_ms: 3_000, logical: 0, node_id: 1 },
+            HlcTimestamp {
+                wall_ms: 3_000,
+                logical: 0,
+                node_id: 1,
+            },
             key_id,
         );
         assert!(

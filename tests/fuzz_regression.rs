@@ -130,9 +130,8 @@ fn rotate_key_op() {
 
 #[test]
 fn set_document_data_op() {
-    let result: Result<DeltaOp, _> = serde_json::from_str(
-        r#"{"type":"set_document_data","key":"name","value":"Alice"}"#,
-    );
+    let result: Result<DeltaOp, _> =
+        serde_json::from_str(r#"{"type":"set_document_data","key":"name","value":"Alice"}"#);
     assert!(result.is_ok());
 }
 
@@ -164,8 +163,7 @@ fn op_type_is_number() {
 
 #[test]
 fn signed_delta_missing_required_fields() {
-    let result: Result<SignedDelta, _> =
-        serde_json::from_str(r#"{"did":"did:crdt:abc"}"#);
+    let result: Result<SignedDelta, _> = serde_json::from_str(r#"{"did":"did:crdt:abc"}"#);
     assert!(result.is_err());
 }
 
