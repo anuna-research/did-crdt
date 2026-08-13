@@ -40,4 +40,9 @@ jobs:
         with:
           components: clippy
       - uses: https://github.com/Swatinem/rust-cache@v2
-      - run: cargo clippy --all-features -- -D warnings
+      # `--all-targets` so tests, benches and examples are linted too. Without
+      # it clippy checks the library ONLY, and a lint in `#[cfg(test)]` code
+      # passes here while failing in any repository that lints its test targets
+      # — which is exactly how two `unnecessary_cast` errors in this project's
+      # test fixtures reached a downstream CI instead of this one.
+      - run: cargo clippy --all-features --all-targets -- -D warnings
