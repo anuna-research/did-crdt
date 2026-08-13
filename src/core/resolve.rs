@@ -58,6 +58,28 @@ pub struct DidDocumentMetadata {
     /// ISO 8601 timestamp of the most recent update to the DID document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<String>,
+
+    /// The public key from which this DID's identifier was derived.
+    ///
+    /// A method-specific property, carried in `didDocumentMetadata` because it
+    /// describes the DID rather than the resolution that produced it: it is
+    /// invariant across resolutions, resolvers, and time, which is precisely
+    /// what `didResolutionMetadata` is not for.
+    ///
+    /// It exists so a verifier can recompute the identifier for itself instead
+    /// of trusting the resolver — the derivation is a hash of this one input.
+    /// Once the genesis key is revoked it is filtered out of `verificationMethod`
+    /// (2P-Set), so without this property the document stops carrying the input
+    /// its own identifier is built from.
+    ///
+    /// Omitted when the resolver could not establish it. Per DID Resolution 1.0
+    /// metadata properties are optional, and absence means "not established" —
+    /// never "checked, and it failed".
+    #[serde(
+        rename = "genesisPublicKeyMultibase",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub genesis_public_key_multibase: Option<String>,
 }
 
 // ── ResolutionResult ────────────────────────────────────────────────────────
@@ -388,6 +410,7 @@ mod tests {
                 version_id: "abc".to_owned(),
                 created: None,
                 updated: None,
+                genesis_public_key_multibase: None,
             },
         };
         let json = serde_json::to_value(&result).unwrap();
@@ -416,10 +439,32 @@ mod tests {
             version_id: "v1".to_owned(),
             created: Some("2026-01-01T00:00:00.000Z".to_owned()),
             updated: Some("2026-03-10T12:00:00.000Z".to_owned()),
+            genesis_public_key_multibase: None,
         };
         let json = serde_json::to_value(&meta).unwrap();
         assert_eq!(json["created"], json!("2026-01-01T00:00:00.000Z"));
         assert_eq!(json["updated"], json!("2026-03-10T12:00:00.000Z"));
+    }
+
+    #[test]
+    fn metadata_genesis_key_wire_spelling_and_omission() {
+        // The rename is what a verifier reads. A Rust-side rename that silently
+        // changed the JSON key would break every consumer while every test that
+        // only touches the struct stayed green.
+        let meta = DidDocumentMetadata {
+            genesis_public_key_multibase: Some("zEd25519TestKey".to_owned()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(
+            json.get("genesisPublicKeyMultibase"),
+            Some(&json!("zEd25519TestKey"))
+        );
+
+        // Absent, not null: `None` must not serialise as an explicit JSON null,
+        // which a consumer could read as an established negative result.
+        let json = serde_json::to_value(&DidDocumentMetadata::default()).unwrap();
+        assert!(json.get("genesisPublicKeyMultibase").is_none());
     }
 
     #[test]
@@ -523,6 +568,7 @@ mod tests {
                 version_id: "deadbeef".to_owned(),
                 created: Some("2026-01-01T00:00:00.000Z".to_owned()),
                 updated: None,
+                genesis_public_key_multibase: None,
             },
         };
         let json = serde_json::to_string(&result).unwrap();

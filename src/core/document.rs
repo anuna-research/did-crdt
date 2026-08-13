@@ -218,6 +218,36 @@ fn topo_order_bundle(by_hash: &HashMap<DeltaHash, SignedDelta>) -> Result<Vec<De
     Ok(order)
 }
 
+/// Derive the `did:crdt:<hash>` identifier from the genesis public key.
+///
+/// The identifier is a pure function of that ONE input: the timestamp is the
+/// all-zero default and the proto-op is built from the key, so nothing else
+/// varies. That is what lets a verifier holding the key recompute the DID for
+/// itself rather than taking a resolver's word for it — see
+/// [`Document::genesis_public_key_multibase`].
+///
+/// Creation and recomputation share this function deliberately. Two copies
+/// that drifted would produce a document whose own identifier no longer
+/// verifies against its genesis key, and nothing else in the system checks
+/// that relation — so the drift would surface as an unexplained verification
+/// failure at a consumer, arbitrarily far from the change that caused it.
+fn derive_did(public_key_multibase: &str) -> Result<Did> {
+    let timestamp = HlcTimestamp::default();
+
+    // A placeholder fragment, because the real key id embeds the DID, which
+    // does not exist until this hash has been taken.
+    let proto_op = DeltaOp::AddVerificationMethod {
+        id: "#key-0".to_owned(),
+        public_key_multibase: public_key_multibase.to_owned(),
+        suite_type: SuiteType::default(),
+        relationships: crate::core::delta::default_relationships(),
+    };
+    let signer_key = public_key_multibase.to_owned();
+
+    let seed_bytes = serde_json::to_vec(&(&timestamp, &proto_op, &signer_key))?;
+    Ok(Did::from_creation_hash(&blake3::hash(&seed_bytes)))
+}
+
 impl Document {
     /// Every verification method currently in resolved state, with the
     /// relationships each one holds.
@@ -245,7 +275,7 @@ impl Document {
 
     /// Create a new DID document from a public key in Multibase encoding.
     ///
-    /// Derives the `did:crdt:<hash>` identifier by:
+    /// Derives the `did:crdt:<hash>` identifier by (see [`derive_did`]):
     /// 1. Building a genesis `AddVerificationMethod` delta (using a stable
     ///    `#key-0` fragment with a temporary placeholder DID).
     /// 2. Hashing `(timestamp, op, signer_key)` with BLAKE3.
@@ -259,20 +289,8 @@ impl Document {
         // Genesis timestamp — all-zero so every subsequent delta is causally
         // later and the creation event is reproducible across replicas.
         let timestamp = HlcTimestamp::default();
-
-        // Build a pre-DID op with a placeholder fragment to hash for the DID.
-        let proto_op = DeltaOp::AddVerificationMethod {
-            id: "#key-0".to_owned(),
-            public_key_multibase: public_key_multibase.to_owned(),
-            suite_type: SuiteType::default(),
-            relationships: crate::core::delta::default_relationships(),
-        };
         let signer_key = public_key_multibase.to_owned();
-
-        // Hash (timestamp, proto_op, signer_key) to derive the DID.
-        let seed_bytes = serde_json::to_vec(&(&timestamp, &proto_op, &signer_key))?;
-        let creation_hash = blake3::hash(&seed_bytes);
-        let did = Did::from_creation_hash(&creation_hash);
+        let did = derive_did(public_key_multibase)?;
 
         // Now that we know the DID, build the real key id.
         let key_id = format!("{}#key-0", did);
@@ -720,6 +738,40 @@ impl Document {
     /// `didDocument` field is `None` per DID Core 1.1 §7.1.
     ///
     /// This operation is pure and read-only — it never mutates CRDT state.
+    /// The public key this DID was derived from, when it can be established.
+    ///
+    /// Published so a verifier can recompute the identifier ITSELF. Two facts
+    /// make that worth carrying:
+    ///
+    /// - [`Self::resolve`] filters revoked keys out of the DID document
+    ///   (2P-Set: authorized = added \ revoked). Once the genesis key is
+    ///   rotated, the served document no longer contains the input its own
+    ///   identifier derives from — the relation stops being checkable exactly
+    ///   when the document stops being self-describing. The 2P-Set still holds
+    ///   the entry, so the node can answer even though its document cannot.
+    /// - The answer cannot be faked. Deriving the DID is a BLAKE3 hash, so
+    ///   preimage resistance means no node can invent a genesis key for a DID
+    ///   it was asked about. A verifier that recomputes needs to trust nothing
+    ///   — which is what separates this from a self-reported boolean, where a
+    ///   dishonest node and an honest one emit the same byte.
+    ///
+    /// The `#key-0` naming convention is deliberately NOT consulted. The
+    /// backing set is a G-Set of whole entries rather than a map keyed on `id`,
+    /// so several entries may carry the same `id` with different keys — picking
+    /// by name would pick by sort order, and a second `#key-0` entry would be
+    /// enough to shadow the genuine one. The hash decides instead, and preimage
+    /// resistance means at most one entry can satisfy it.
+    ///
+    /// Returns `None` when no key held derives this DID. Absent means "could
+    /// not establish", and must never be read as "established, and it failed".
+    pub fn genesis_public_key_multibase(&self) -> Option<String> {
+        self.verification_methods
+            .entries()
+            .into_iter()
+            .find(|e| derive_did(&e.public_key_multibase).is_ok_and(|d| d == self.did))
+            .map(|e| e.public_key_multibase)
+    }
+
     pub fn resolve(&self) -> Result<ResolutionResult> {
         let is_deactivated = self.deactivated.is_set();
 
@@ -854,6 +906,11 @@ impl Document {
             version_id,
             created: self.created_ms.map(ms_to_iso8601),
             updated: self.updated_ms.map(ms_to_iso8601),
+            // Emitted even when the document is deactivated: the identifier is
+            // still derived from this key, and a verifier checking a tombstone
+            // has the same reason to want the relation as one checking a live
+            // document.
+            genesis_public_key_multibase: self.genesis_public_key_multibase(),
         };
 
         Ok(ResolutionResult {
@@ -1843,6 +1900,133 @@ mod tests {
             node_id: 1,
         };
         merge_op(&mut doc, op, ts, &signer).expect("delta under 64 KiB should be accepted");
+    }
+
+    #[test]
+    // ── genesis key, published so a verifier can recompute the DID ────────────
+    #[test]
+    fn genesis_key_recomputes_the_did() {
+        let (doc, _) = make_doc();
+        let published = doc
+            .genesis_public_key_multibase()
+            .expect("a freshly created document knows its own genesis key");
+
+        // The property is only worth anything if it actually derives the
+        // identifier — assert the relation, not the string.
+        assert_eq!(derive_did(&published).unwrap(), doc.did);
+        assert_eq!(published, "zEd25519TestKey");
+    }
+
+    #[test]
+    fn genesis_key_survives_revocation_of_that_key() {
+        // The whole reason this property exists. `resolve` filters revoked keys
+        // out of `verificationMethod`, so after rotation the document no longer
+        // carries the input its own identifier derives from. The metadata must
+        // still carry it, or the relation becomes uncheckable at exactly the
+        // point a verifier most wants to check it.
+        let (mut doc, _) = make_doc();
+        let genesis_id = doc.verification_methods.entries()[0].id.clone();
+        let key1_id = format!("{}#key-1", doc.did);
+        merge_op(
+            &mut doc,
+            DeltaOp::AddVerificationMethod {
+                id: key1_id.clone(),
+                public_key_multibase: "zSecondKey".to_owned(),
+                suite_type: SuiteType::default(),
+                relationships: crate::core::delta::default_relationships(),
+            },
+            HlcTimestamp {
+                wall_ms: 10,
+                logical: 0,
+                node_id: 1,
+            },
+            &genesis_id,
+        )
+        .unwrap();
+        merge_op(
+            &mut doc,
+            DeltaOp::RevokeVerificationMethod {
+                key_id: genesis_id.clone(),
+            },
+            HlcTimestamp {
+                wall_ms: 20,
+                logical: 0,
+                node_id: 1,
+            },
+            &key1_id,
+        )
+        .unwrap();
+
+        let result = doc.resolve().unwrap();
+        let served = result.did_document.unwrap();
+
+        // Precondition: the served document has genuinely lost the key.
+        assert!(
+            !served
+                .verification_method
+                .iter()
+                .any(|m| m.id == genesis_id),
+            "the revoked genesis key must not appear in the served document"
+        );
+
+        // And the metadata still lets a verifier close the loop.
+        let published = result
+            .did_document_metadata
+            .genesis_public_key_multibase
+            .expect("genesis key must outlive its own revocation in metadata");
+        assert_eq!(derive_did(&published).unwrap(), doc.did);
+    }
+
+    #[test]
+    fn a_shadowing_key_0_entry_does_not_displace_the_genesis_key() {
+        // The set is a G-Set of whole entries, so an `id` is not unique: adding
+        // a second `#key-0` carrying a different key leaves BOTH present. If
+        // this property were resolved by name it would be resolved by sort
+        // order, and this is the entry that would decide it.
+        let (mut doc, _) = make_doc();
+        let genesis_id = format!("{}#key-0", doc.did);
+        doc.verification_methods.insert(
+            genesis_id.clone(),
+            "zAAAShadowSortsFirst".to_owned(),
+            SuiteType::default(),
+            crate::core::delta::default_relationships(),
+        );
+        assert_eq!(
+            doc.verification_methods
+                .entries()
+                .iter()
+                .filter(|e| e.id == genesis_id)
+                .count(),
+            2,
+            "premise: both entries coexist under one id"
+        );
+
+        let published = doc
+            .genesis_public_key_multibase()
+            .expect("the genuine genesis key must still be found");
+        assert_eq!(published, "zEd25519TestKey");
+        assert_eq!(derive_did(&published).unwrap(), doc.did);
+    }
+
+    #[test]
+    fn genesis_key_is_omitted_when_no_held_key_derives_the_did() {
+        // Models the substitution this property exists to expose: state served
+        // under a DID that none of its keys derive. Emitting a plausible-looking
+        // key here would invite a verifier to conclude the relation holds.
+        let (mut doc, _) = make_doc();
+        doc.did = derive_did("zSomeOtherKeyEntirely").unwrap();
+
+        assert_eq!(
+            doc.genesis_public_key_multibase(),
+            None,
+            "no key derives this DID, so nothing may be published"
+        );
+        assert!(doc
+            .resolve()
+            .unwrap()
+            .did_document_metadata
+            .genesis_public_key_multibase
+            .is_none());
     }
 
     #[test]
