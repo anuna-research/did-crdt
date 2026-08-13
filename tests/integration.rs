@@ -701,7 +701,7 @@ mod http_api {
         assert!(
             doc["verificationMethod"]
                 .as_array()
-                .map_or(false, |a| !a.is_empty()),
+                .is_some_and(|a| !a.is_empty()),
             "resolved document must have at least one verification method"
         );
 

@@ -912,17 +912,17 @@ mod tests {
         while let Some((from, msg)) = queue.pop_front() {
             budget -= 1;
             assert!(budget > 0, "gossip simulation did not quiesce");
-            for j in 0..nodes.len() {
+            for (j, node) in nodes.iter_mut().enumerate() {
                 if j == from {
                     continue;
                 }
-                let docs = nodes[j].docs.clone();
-                let (out, deliver) = nodes[j].state.handle(msg.clone(), &docs, &deny());
+                let docs = node.docs.clone();
+                let (out, deliver) = node.state.handle(msg.clone(), &docs, &deny());
                 for o in out {
                     queue.push_back((j, o));
                 }
                 if let Some(d) = deliver {
-                    apply_deliver(&mut nodes[j], d);
+                    apply_deliver(node, d);
                 }
             }
         }

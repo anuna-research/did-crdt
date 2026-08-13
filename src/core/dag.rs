@@ -438,7 +438,7 @@ mod tests {
         // A delta whose parent is absent: the query cannot resolve.
         let dag = DeltaDag::new();
         let missing = DeltaHash("deadbeef".into());
-        let q = dag.closure_find(&[missing.clone()], |_| true);
+        let q = dag.closure_find(std::slice::from_ref(&missing), |_| true);
         assert_eq!(q, ClosureQuery::Incomplete(vec![missing]));
     }
 

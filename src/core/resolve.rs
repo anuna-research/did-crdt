@@ -539,7 +539,7 @@ mod tests {
 
         // Absent, not null: `None` must not serialise as an explicit JSON null,
         // which a consumer could read as an established negative result.
-        let json = serde_json::to_value(&DidDocumentMetadata::default()).unwrap();
+        let json = serde_json::to_value(DidDocumentMetadata::default()).unwrap();
         assert!(json.get("genesisPublicKeyMultibase").is_none());
     }
 

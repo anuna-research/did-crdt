@@ -142,8 +142,7 @@ fn all_permutations_converge() {
     let did = base.did.clone();
 
     // Build 4 distinct deltas with unique timestamps.
-    let deltas = vec![
-        unsigned_delta(
+    let deltas = [unsigned_delta(
             &base,
             DeltaOp::AddServiceEndpoint {
                 id: format!("{did}#svc-0"),
@@ -177,8 +176,7 @@ fn all_permutations_converge() {
                 value: serde_json::json!("hello"),
             },
             ts(400, 4),
-        ),
-    ];
+        )];
 
     // Generate all 24 permutations of indices [0,1,2,3].
     let indices: Vec<usize> = (0..4).collect();

@@ -388,7 +388,10 @@ mod tests {
     use crate::core::{delta::DeltaOp, document::Document};
     use crate::sync::gossip::genesis_bootstrap;
 
-    fn make_dht() -> (DhtNode, Arc<Mutex<HashMap<[u8; 32], SignedPacket>>>) {
+    /// The in-process packet store a test DHT node publishes into.
+    type PacketStore = Arc<Mutex<HashMap<[u8; 32], SignedPacket>>>;
+
+    fn make_dht() -> (DhtNode, PacketStore) {
         let store = Arc::new(Mutex::new(HashMap::new()));
         let addr_store = Arc::new(Mutex::new(HashMap::new()));
         let node = DhtNode::new_in_process(store.clone(), addr_store, Duration::from_secs(5));

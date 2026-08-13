@@ -602,8 +602,8 @@ fn regression_concurrent_add_remove_converges_via_delta_path() {
 
     // A adds svc-x (node 1). B concurrently removes svc-x (node 2) without ever
     // having seen the add. Both are grounded on genesis, so they are concurrent.
-    let a_deltas = author_deltas(&base, &[add.clone()]);
-    let b_deltas = author_deltas(&base, &[remove.clone()]);
+    let a_deltas = author_deltas(&base, std::slice::from_ref(&add));
+    let b_deltas = author_deltas(&base, std::slice::from_ref(&remove));
 
     let mut ra = base.clone();
     for d in a_deltas.iter().chain(b_deltas.iter()) {

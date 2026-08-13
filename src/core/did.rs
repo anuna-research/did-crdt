@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn parse_empty_id_fails() {
-        assert!(format!("{PREFIX}").parse::<Did>().is_err());
+        assert!(PREFIX.to_string().parse::<Did>().is_err());
     }
 
     // -- Serde ----------------------------------------------------------------
