@@ -279,6 +279,17 @@ impl Document {
         self.revocations.entries()
     }
 
+    /// The current `alsoKnownAs` alias set, sorted and deduplicated.
+    ///
+    /// Offered alongside [`Self::resolve`] rather than only inside it, for the
+    /// same reason as [`Self::verification_methods`]: a consumer checking a
+    /// reciprocal binding needs the aliases as data, not as a rendered
+    /// document, and `resolve` yields nothing at all for a deactivated DID —
+    /// which is precisely a case where knowing what a DID claimed still matters.
+    pub fn also_known_as(&self) -> Vec<String> {
+        self.also_known_as.entries().to_vec()
+    }
+
     // ── construction ─────────────────────────────────────────────────────────
 
     /// Create a new DID document from a public key in Multibase encoding.
