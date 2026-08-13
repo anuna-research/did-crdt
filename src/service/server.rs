@@ -63,22 +63,6 @@ pub struct ServerConfig {
     /// bootstrap DIDs they are asked to resolve (CON-006 §admission control).
     /// Env: `REPLICATE_ALL=true`.
     pub replicate_all: bool,
-
-    /// This node's stable identity, as it appears in a Path-B resolver closure.
-    ///
-    /// A verifier applying a two-resolver union needs to say WHICH node reported
-    /// what — otherwise two answers from one operator are indistinguishable from
-    /// two independently operated ones, and the union asserts nothing. So this
-    /// is configuration rather than something derived: it names an operator's
-    /// deployment, and only the operator knows that.
-    ///
-    /// `None` means the node does not claim one, and the property is then
-    /// **omitted** from the resolution metadata rather than reported empty. An
-    /// absent property says "not stated"; an empty string would be a claim to
-    /// a name that is blank.
-    ///
-    /// Env: `RESOLVER_ID` (e.g. `did.anuna.io`).
-    pub resolver_id: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -94,10 +78,6 @@ impl Default for ServerConfig {
             resolve_timeout_ms: 10_000,
             dht_lookup_timeout_ms: 5_000,
             replicate_all: false,
-            // Unset by default: a node that has not been told who it is does not
-            // invent a name, and the metadata property is omitted rather than
-            // carrying one nobody chose.
-            resolver_id: None,
         }
     }
 }
@@ -119,9 +99,6 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     /// Total timeout for cold-start DID resolution.
     pub resolve_timeout: Duration,
-    /// This node's stable identity for Path-B resolution metadata, if it claims
-    /// one. Carried on the state because the handler projects it per response.
-    pub resolver_id: Option<String>,
 }
 
 impl AppState {
@@ -135,7 +112,6 @@ impl AppState {
             dht: None,
             metrics: Arc::new(Metrics::new()),
             resolve_timeout: Duration::from_millis(10_000),
-            resolver_id: None,
         }
     }
 }
@@ -254,7 +230,6 @@ impl Server {
             }
 
             state.resolve_timeout = Duration::from_millis(config.resolve_timeout_ms);
-            state.resolver_id = config.resolver_id.clone();
 
             let handle = node.spawn();
             tokio::spawn(async move {

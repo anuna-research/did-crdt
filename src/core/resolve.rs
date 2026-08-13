@@ -29,20 +29,6 @@ pub struct DidResolutionMetadata {
     /// The MIME type of the resolved representation.
     #[serde(rename = "contentType")]
     pub content_type: String,
-
-    /// Which node produced this resolution.
-    ///
-    /// A method-specific property, which W3C DID Resolution 1.0 permits and
-    /// asks to be registered. It belongs in the RESOLUTION metadata rather than
-    /// the document's: it describes who answered, not what the document says.
-    ///
-    /// **Omitted when the node claims no identity.** An absent property means
-    /// "not stated"; there is deliberately no empty-string form, because a
-    /// blank name is a claim rather than a silence — and a verifier applying a
-    /// two-resolver union must be able to tell two operators apart from one
-    /// operator answering twice.
-    #[serde(rename = "resolverId", skip_serializing_if = "Option::is_none")]
-    pub resolver_id: Option<String>,
 }
 
 // ── DidDocumentMetadata ─────────────────────────────────────────────────────
@@ -375,47 +361,11 @@ mod tests {
     // ── ResolutionResult serialisation ─────────────────────────────────────────
 
     #[test]
-    /// `resolverId` is present when the node claims one and ABSENT when it does
-    /// not — never an empty string.
-    ///
-    /// The distinction is load-bearing rather than tidy. A verifier applying a
-    /// two-resolver union has to tell two independently operated nodes apart
-    /// from one operator answering twice; an absent property says "not stated",
-    /// where a blank one would be a claim to a name nobody chose.
-    #[test]
-    fn resolver_id_is_omitted_rather_than_blank() {
-        let named = ResolutionResult {
-            did_resolution_metadata: DidResolutionMetadata {
-                content_type: "application/did+ld+json".to_owned(),
-                resolver_id: Some("did.anuna.io".to_owned()),
-            },
-            did_document: Some(DidDocument::empty(&test_did())),
-            did_document_metadata: DidDocumentMetadata::default(),
-        };
-        let json = serde_json::to_value(&named).expect("serialises");
-        assert_eq!(json["didResolutionMetadata"]["resolverId"], "did.anuna.io");
-
-        let anonymous = ResolutionResult {
-            did_resolution_metadata: DidResolutionMetadata {
-                content_type: "application/did+ld+json".to_owned(),
-                resolver_id: None,
-            },
-            did_document: Some(DidDocument::empty(&test_did())),
-            did_document_metadata: DidDocumentMetadata::default(),
-        };
-        let json = serde_json::to_value(&anonymous).expect("serialises");
-        assert!(
-            json["didResolutionMetadata"].get("resolverId").is_none(),
-            "an unnamed node omits the property rather than reporting it empty"
-        );
-    }
-
     #[test]
     fn resolution_result_has_three_parts() {
         let result = ResolutionResult {
             did_resolution_metadata: DidResolutionMetadata {
                 content_type: "application/did+ld+json".to_owned(),
-                resolver_id: None,
             },
             did_document: Some(DidDocument::empty(&test_did())),
             did_document_metadata: DidDocumentMetadata::default(),
@@ -431,7 +381,6 @@ mod tests {
         let result = ResolutionResult {
             did_resolution_metadata: DidResolutionMetadata {
                 content_type: "application/did+ld+json".to_owned(),
-                resolver_id: None,
             },
             did_document: None,
             did_document_metadata: DidDocumentMetadata {
@@ -567,7 +516,6 @@ mod tests {
         let result = ResolutionResult {
             did_resolution_metadata: DidResolutionMetadata {
                 content_type: "application/did+ld+json".to_owned(),
-                resolver_id: None,
             },
             did_document: Some(DidDocument::empty(&did)),
             did_document_metadata: DidDocumentMetadata {

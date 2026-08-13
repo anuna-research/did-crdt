@@ -859,10 +859,6 @@ impl Document {
         Ok(ResolutionResult {
             did_resolution_metadata: DidResolutionMetadata {
                 content_type: "application/did+ld+json".to_owned(),
-                // The core does not know which node it is running in, and must
-                // not guess. The service layer stamps this before responding;
-                // a library caller resolving locally has no resolver to name.
-                resolver_id: None,
             },
             did_document,
             did_document_metadata,

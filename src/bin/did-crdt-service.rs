@@ -12,7 +12,6 @@
 //! | `RESOLVE_TIMEOUT_MS`   | `10000`                    | Cold-start resolution total timeout (ms) |
 //! | `DHT_LOOKUP_TIMEOUT_MS`| `5000`                     | pkarr lookup sub-timeout (ms)            |
 //! | `REPLICATE_ALL`        | *(unset)*                  | Set to `true` to bootstrap every DID announced on the mesh (full-replica mode; accepts unbounded storage growth) |
-//! | `RESOLVER_ID`          | *(unset)*                  | This node's stable identity in Path-B resolution metadata (e.g. `did.anuna.io`). A verifier applying a two-resolver union needs to say which node reported what; unset means the property is omitted |
 
 use std::net::SocketAddr;
 
@@ -52,11 +51,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let replicate_all = std::env::var("REPLICATE_ALL").ok().as_deref() == Some("true");
 
-    // An empty value is treated as unset. A node whose identity is the empty
-    // string has not been named, and the metadata property is better omitted
-    // than carrying a blank claim.
-    let resolver_id = std::env::var("RESOLVER_ID").ok().filter(|id| !id.is_empty());
-
     let config = ServerConfig {
         listen_addr,
         peers,
@@ -64,7 +58,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dht_relay_url,
         disable_dht_publish,
         resolve_timeout_ms,
-        resolver_id,
         dht_lookup_timeout_ms,
         replicate_all,
     };

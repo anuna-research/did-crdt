@@ -192,16 +192,6 @@ pub async fn resolve_did(State(state): State<AppState>, Path(did_str): Path<Stri
 
     state.metrics.observe_resolution(elapsed, field_count);
 
-    // Stamp this node's identity, if it claims one. Done HERE rather than in
-    // `Document::resolve` because the core has no idea which node it is running
-    // in — and a library caller resolving locally has no resolver to name.
-    //
-    // `clone` per response is a short string on a path that has just walked a
-    // CRDT and serialised a document.
-    let mut result = result;
-    result.did_resolution_metadata.resolver_id = state.resolver_id.clone();
-    let result = result;
-
     if result.did_document_metadata.deactivated {
         return (StatusCode::GONE, Json(result)).into_response();
     }
