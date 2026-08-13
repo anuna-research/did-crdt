@@ -1179,6 +1179,47 @@ mod tests {
         assert_ne!(a.did, b.did);
     }
 
+    #[test]
+    fn did_derivation_is_pinned_to_known_vectors() {
+        // The derivation is the most consequential constant in the method: if
+        // it changes, every DID already issued becomes unresolvable, and every
+        // signature chained to one stops verifying. Nothing else in the suite
+        // pins it — the other tests assert relations between DIDs (distinct
+        // keys differ, round-trips agree), all of which hold just as well
+        // AFTER a change to the hash input. So a refactor could silently
+        // reissue every identifier in the world and the suite would stay green.
+        //
+        // These vectors were captured from the implementation as it stood at
+        // c59fd24, before `derive_did` was extracted, and confirmed identical
+        // after. Changing them is not a test fix — it is a breaking change to
+        // the method, and needs a migration story before the numbers move.
+        for (key, expected) in [
+            (
+                "zEd25519TestKey",
+                "did:crdt:a9baa8e5775077f7c22e671167a641bab4498c7e06e7dd7d92c43b83656504db",
+            ),
+            (
+                "zAnotherKey",
+                "did:crdt:bb2800f268648cc3abe559bcab94edcedcfa68ef7d462304e9920316c4c81f6b",
+            ),
+            // The empty key is not a valid input, but it is a valid probe of
+            // the encoding: it pins the framing around a zero-length field.
+            (
+                "",
+                "did:crdt:cc650842519c330619c244a36d0530dab5eee84bd785a00c7b989121ba2f6d06",
+            ),
+        ] {
+            assert_eq!(
+                Document::new(key).unwrap().0.did.as_str(),
+                expected,
+                "DID derivation changed for {key:?} — see the note above before touching this"
+            );
+            // The standalone entry point must agree with creation, or a
+            // verifier recomputing would disagree with the issuer.
+            assert_eq!(derive_did(key).unwrap().as_str(), expected);
+        }
+    }
+
     // ── merge() ───────────────────────────────────────────────────────────────
 
     fn signed_delta(doc: &Document, op: DeltaOp, signer: &str) -> SignedDelta {
