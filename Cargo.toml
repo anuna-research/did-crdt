@@ -59,6 +59,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tokio     = { version = "1", features = ["full"] }
 reqwest   = { version = "0.12", features = ["json"] }
 tower     = { version = "0.5", features = ["util"] }
+tempfile  = "3"
 
 [[bin]]
 name              = "did-crdt-service"

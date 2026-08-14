@@ -24,6 +24,7 @@ use crate::core::hlc::HlcTimestamp;
 use crate::sync::dht::DhtNode;
 use crate::sync::gossip::{merge_inbound, BootstrapPolicy, GossipEngine, MergeOutcome};
 use crate::sync::protocol::SyncMessage;
+use crate::sync::store::FsBlobStore;
 
 /// Per-peer budget for one cold-start attempt: connect + REQUEST/DELTAS
 /// round-trip (CON-006 §cold-start, suggested sub-timeout). Bounded so that at
@@ -58,6 +59,9 @@ pub struct LiveNode {
     /// Admission policy for unknown DIDs (CON-006 §admission control), shared
     /// with the sync loop and gossip engine.
     policy: BootstrapPolicy,
+    /// Durable snapshot store, shared with the service layer. `None` when the
+    /// node is running ephemerally.
+    persistence: Option<Arc<FsBlobStore>>,
 }
 
 impl LiveNode {
@@ -66,7 +70,8 @@ impl LiveNode {
     /// `dht` is `None` when DHT publication is disabled via `DISABLE_DHT_PUBLISH`.
     /// `replicate_all` opts this node into bootstrapping every DID announced on
     /// the mesh (`REPLICATE_ALL=true`); the default admits only DIDs with a
-    /// pending cold-start request.
+    /// pending cold-start request. `persistence` is the durable snapshot store
+    /// shared with the service layer, or `None` to run ephemerally.
     ///
     /// # Errors
     ///
@@ -76,6 +81,7 @@ impl LiveNode {
         docs: DocStore,
         dht: Option<Arc<DhtNode>>,
         replicate_all: bool,
+        persistence: Option<Arc<FsBlobStore>>,
     ) -> anyhow::Result<Self> {
         let endpoint = Endpoint::builder()
             .secret_key(SecretKey::generate())
@@ -97,6 +103,7 @@ impl LiveNode {
             docs,
             dht,
             policy,
+            persistence,
         })
     }
 
@@ -291,8 +298,9 @@ impl LiveNode {
         let docs = self.docs.clone();
         let dht = self.dht.clone();
         let policy = self.policy.clone();
+        let persistence = self.persistence.clone();
         tokio::spawn(async move {
-            let _ = run_loop(endpoint, gossip, topic, docs, dht, policy).await;
+            let _ = run_loop(endpoint, gossip, topic, docs, dht, policy, persistence).await;
         })
     }
 }
@@ -306,6 +314,7 @@ async fn run_loop(
     docs: DocStore,
     dht: Option<Arc<DhtNode>>,
     policy: BootstrapPolicy,
+    persistence: Option<Arc<FsBlobStore>>,
 ) -> anyhow::Result<()> {
     let mut engine = GossipEngine::new(gossip.clone(), topic, policy.clone());
     let mut stream = gossip.subscribe(topic).await?;
@@ -330,11 +339,35 @@ async fn run_loop(
             // Read-only snapshot for routing (no lock held across the await).
             let snapshot = { docs.lock().clone() };
             if let Ok(Some(deliver)) = engine.handle_bytes(&msg.content, &snapshot).await {
+                // `merge_inbound` consumes the message and `MergeOutcome::Merged`
+                // does not name the DID, so capture it here while it is still
+                // readable.
+                let touched = match &deliver {
+                    SyncMessage::Deltas { did, .. } => Some(did.clone()),
+                    _ => None,
+                };
                 // Acquire lock for the sync merge, then release before any await.
                 let outcome = {
                     let mut guard = docs.lock();
                     merge_inbound(&mut guard, deliver, &policy)
                 };
+                // Persist whatever the merge changed. Deltas arriving over
+                // gossip are a write path like any other: without this, a
+                // replica that converged purely from peers would lose that
+                // state on restart.
+                if matches!(
+                    outcome,
+                    MergeOutcome::Merged | MergeOutcome::Bootstrapped(_)
+                ) {
+                    if let (Some(store), Some(did)) = (&persistence, &touched) {
+                        let snapshot = { docs.lock().get(did).cloned() };
+                        if let Some(doc) = snapshot {
+                            if let Err(e) = store.save(&doc).await {
+                                eprintln!("did-crdt: persisting {did} after gossip merge failed: {e}");
+                            }
+                        }
+                    }
+                }
                 // After genesis bootstrap, publish this node to DHT (trigger 1).
                 if let MergeOutcome::Bootstrapped(did) = outcome {
                     if let Some(ref dht) = dht {
@@ -428,10 +461,10 @@ mod tests {
         let a_docs = store(a_doc);
         let b_docs = store(b_doc);
 
-        let a = LiveNode::bind(topic, a_docs.clone(), None, false)
+        let a = LiveNode::bind(topic, a_docs.clone(), None, false, None)
             .await
             .unwrap();
-        let b = LiveNode::bind(topic, b_docs.clone(), None, false)
+        let b = LiveNode::bind(topic, b_docs.clone(), None, false, None)
             .await
             .unwrap();
 

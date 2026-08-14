@@ -950,7 +950,7 @@ mod cold_start_convergence {
             Duration::from_secs(5),
         ));
         let topic = topic_for(b"did-crdt/test-023-cold-start");
-        let node_a = LiveNode::bind(topic, docs_a.clone(), Some(dht_a.clone()), false)
+        let node_a = LiveNode::bind(topic, docs_a.clone(), Some(dht_a.clone()), false, None)
             .await
             .unwrap();
         let _task_a = node_a.spawn();
@@ -963,7 +963,7 @@ mod cold_start_convergence {
             addr_store.clone(),
             Duration::from_secs(5),
         ));
-        let node_b = LiveNode::bind(topic, docs_b.clone(), Some(dht_b.clone()), false)
+        let node_b = LiveNode::bind(topic, docs_b.clone(), Some(dht_b.clone()), false, None)
             .await
             .unwrap();
         let _task_b = node_b.spawn();
@@ -974,6 +974,7 @@ mod cold_start_convergence {
             docs: docs_a,
             live_node: Some(Arc::new(node_a)),
             dht: Some(dht_a),
+            persistence: None,
             metrics: Arc::new(Metrics::new()),
             resolve_timeout: Duration::from_secs(15),
         };
@@ -981,6 +982,7 @@ mod cold_start_convergence {
             docs: docs_b.clone(),
             live_node: Some(Arc::new(node_b)),
             dht: Some(dht_b),
+            persistence: None,
             metrics: Arc::new(Metrics::new()),
             resolve_timeout: Duration::from_secs(15),
         };
@@ -1134,10 +1136,10 @@ mod live_two_node {
 
         // ── Gossip setup (spawn run-loops before seed/connect) ────────────────
         let topic = topic_for(b"did-crdt/test-live-delta");
-        let node_a = LiveNode::bind(topic, docs_a.clone(), None, false)
+        let node_a = LiveNode::bind(topic, docs_a.clone(), None, false, None)
             .await
             .unwrap();
-        let node_b = LiveNode::bind(topic, docs_b.clone(), None, true)
+        let node_b = LiveNode::bind(topic, docs_b.clone(), None, true, None)
             .await
             .unwrap();
         let _task_a = node_a.spawn();
@@ -1151,6 +1153,7 @@ mod live_two_node {
             docs: docs_a,
             live_node: Some(Arc::new(node_a)),
             dht: None,
+            persistence: None,
             metrics: Arc::new(Metrics::new()),
             resolve_timeout: std::time::Duration::from_secs(10),
         };
@@ -1158,6 +1161,7 @@ mod live_two_node {
             docs: docs_b,
             live_node: Some(Arc::new(node_b)),
             dht: None,
+            persistence: None,
             metrics: Arc::new(Metrics::new()),
             resolve_timeout: std::time::Duration::from_secs(10),
         };

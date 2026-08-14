@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         addr_store.clone(),
         Duration::from_secs(5),
     ));
-    let node_a = LiveNode::bind(topic, docs_a.clone(), Some(dht_a.clone()), false).await?;
+    let node_a = LiveNode::bind(topic, docs_a.clone(), Some(dht_a.clone()), false, None).await?;
     let _task_a = node_a.spawn();
     node_a.seed().await?;
     let a_node_id = node_a.node_id();
@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         docs: docs_a.clone(),
         live_node: Some(Arc::new(node_a)),
         dht: Some(dht_a),
+        persistence: None,
         metrics: Arc::new(Metrics::new()),
         resolve_timeout: Duration::from_secs(10),
     };
@@ -101,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         addr_store.clone(),
         Duration::from_secs(5),
     ));
-    let node_b = LiveNode::bind(topic, docs_b.clone(), Some(dht_b.clone()), false).await?;
+    let node_b = LiveNode::bind(topic, docs_b.clone(), Some(dht_b.clone()), false, None).await?;
     let _task_b = node_b.spawn();
     node_b.seed().await?;
     let b_node_id = node_b.node_id();
@@ -111,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         docs: docs_b.clone(),
         live_node: Some(Arc::new(node_b)),
         dht: Some(dht_b),
+        persistence: None,
         metrics: Arc::new(Metrics::new()),
         resolve_timeout: Duration::from_secs(15),
     };
