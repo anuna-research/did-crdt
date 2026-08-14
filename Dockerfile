@@ -73,7 +73,7 @@ VOLUME ["/data"]
 # ── Configuration via environment variables ───────────────────────────────────
 # LISTEN_ADDR  — TCP bind address          (default: 0.0.0.0:8080)
 # PEERS        — comma-separated peer list (default: empty)
-# STORAGE_PATH — persistent store path     (currently logged only; see server.rs)
+# STORAGE_PATH — persistent store dir      (default: unset ⇒ in-memory only)
 ENV LISTEN_ADDR=0.0.0.0:8080
 
 EXPOSE 8080

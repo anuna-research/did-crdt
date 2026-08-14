@@ -6,7 +6,7 @@
 //! |------------------------|----------------------------|------------------------------------------|
 //! | `LISTEN_ADDR`          | `0.0.0.0:8080`             | TCP address and port to bind             |
 //! | `PEERS`                | *(empty)*                  | Comma-separated `NodeId@host:port` list  |
-//! | `STORAGE_PATH`         | *(in-memory)*              | Path for persistent iroh-blobs store     |
+//! | `STORAGE_PATH`         | *(in-memory)*              | Directory for the persistent iroh-blobs store. Snapshots are written on every accepted change and reloaded at startup; unset means state is lost on exit. Startup fails if the path cannot be opened. |
 //! | `DHT_RELAY_URL`        | `https://relay.pkarr.org`  | pkarr HTTP relay for peer discovery      |
 //! | `DISABLE_DHT_PUBLISH`  | *(unset)*                  | Set to `true` to opt out of DHT          |
 //! | `RESOLVE_TIMEOUT_MS`   | `10000`                    | Cold-start resolution total timeout (ms) |

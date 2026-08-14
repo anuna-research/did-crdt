@@ -11,6 +11,7 @@
 //! | GET    | /:did                 | resolve a DID to a DID doc     |
 //! | POST   | /dids/:did/deltas     | submit a signed delta          |
 //! | GET    | /metrics              | prometheus metrics             |
+//! | GET    | /health               | liveness + storage/sync status |
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -95,6 +96,12 @@ pub struct AppState {
     /// DHT node for peer discovery and genesis bootstrap.
     #[cfg(feature = "sync")]
     pub dht: Option<Arc<crate::sync::dht::DhtNode>>,
+    /// Durable snapshot store, present only when `STORAGE_PATH` is configured.
+    ///
+    /// `None` means the `DocStore` is the only copy of the state and the
+    /// process is ephemeral.
+    #[cfg(feature = "sync")]
+    pub persistence: Option<Arc<crate::sync::store::FsBlobStore>>,
     /// Prometheus metrics.
     pub metrics: Arc<Metrics>,
     /// Total timeout for cold-start DID resolution.
@@ -110,6 +117,8 @@ impl AppState {
             live_node: None,
             #[cfg(feature = "sync")]
             dht: None,
+            #[cfg(feature = "sync")]
+            persistence: None,
             metrics: Arc::new(Metrics::new()),
             resolve_timeout: Duration::from_millis(10_000),
         }
@@ -132,9 +141,10 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         // DID creation
         .route("/dids", post(handlers::create_did))
-        // DID resolution — static `/metrics` is registered first so it takes
+        // DID resolution — the static routes are registered first so they take
         // precedence over the dynamic `/:did` pattern.
         .route("/metrics", get(handlers::get_metrics))
+        .route("/health", get(handlers::get_health))
         .route("/:did", get(handlers::resolve_did))
         // Delta submission
         .route("/dids/:did/deltas", post(handlers::submit_delta))
@@ -161,7 +171,52 @@ impl Server {
         {
             use crate::sync::dht::DhtNode;
             use crate::sync::live::{topic_for, LiveNode};
+            use crate::sync::store::BlobStore;
             use std::time::Duration;
+
+            // Open the durable store and recover prior state *before* the node
+            // joins the mesh, so a restarted replica announces what it already
+            // holds rather than re-bootstrapping it from peers.
+            if let Some(ref path) = config.storage_path {
+                match BlobStore::new_fs(path).await {
+                    Ok(store) => {
+                        match store.load_all().await {
+                            Ok(docs) => {
+                                let recovered = docs.len();
+                                {
+                                    let mut guard = state.docs.lock();
+                                    for doc in docs {
+                                        guard.insert(doc.did.clone(), doc);
+                                    }
+                                }
+                                eprintln!(
+                                    "did-crdt: recovered {recovered} document(s) from {}",
+                                    path.display()
+                                );
+                            }
+                            // A listing failure is not a reason to refuse to
+                            // serve; the node continues with an empty store and
+                            // rebuilds from the mesh.
+                            Err(e) => eprintln!(
+                                "did-crdt: could not read snapshots from {}: {e}",
+                                path.display()
+                            ),
+                        }
+                        state.persistence = Some(Arc::new(store));
+                    }
+                    // Refuse to start rather than silently run ephemeral: an
+                    // operator who set STORAGE_PATH is asking for durability,
+                    // and quietly not providing it is the failure this whole
+                    // change exists to remove.
+                    Err(e) => {
+                        return Err(format!(
+                            "STORAGE_PATH {} could not be opened: {e}",
+                            path.display()
+                        )
+                        .into());
+                    }
+                }
+            }
 
             // Build the DHT node (unless opted out).
             let dht: Option<Arc<DhtNode>> = if config.disable_dht_publish {
@@ -178,8 +233,14 @@ impl Server {
             };
 
             let topic = topic_for(b"did-crdt/v1");
-            let node = LiveNode::bind(topic, state.docs.clone(), dht.clone(), config.replicate_all)
-                .await?;
+            let node = LiveNode::bind(
+                topic,
+                state.docs.clone(),
+                dht.clone(),
+                config.replicate_all,
+                state.persistence.clone(),
+            )
+            .await?;
             if config.peers.is_empty() {
                 node.seed().await?;
             } else {
@@ -248,7 +309,13 @@ impl Server {
         tracing_log(&config);
         eprintln!("READY http://{local_addr}");
 
-        axum::serve(listener, app).await?;
+        // Stop accepting on SIGTERM and let in-flight requests finish. This is
+        // what makes the durable store safe to restart under: the blobs store's
+        // background actor flushes when the last handle drops, which cannot
+        // happen if the process is killed while `serve` still owns the router.
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
         Ok(())
     }
 
@@ -267,6 +334,40 @@ impl Server {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Resolve when the process is asked to stop.
+///
+/// Waits on SIGTERM (how container runtimes ask) and SIGINT (Ctrl-C). If the
+/// SIGTERM handler cannot be installed, this waits on Ctrl-C alone rather than
+/// returning immediately — resolving early would shut the server down the
+/// moment it started.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("did-crdt: cannot listen for SIGTERM ({e}); Ctrl-C only");
+                ctrl_c.await;
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
+
+    eprintln!("did-crdt: shutdown signal received, draining");
+}
 
 /// Parse a `"NodeId@ip:port"` string into an iroh [`NodeAddr`].
 ///
@@ -333,6 +434,76 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── GET /health ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn health_endpoint_reports_ok() {
+        use axum::body::to_bytes;
+
+        let app = make_app();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["documents"], 0);
+        // AppState::new() carries no persistence handle.
+        assert_eq!(json["storage"], "ephemeral");
+    }
+
+    #[tokio::test]
+    async fn health_counts_documents() {
+        use axum::body::to_bytes;
+
+        let app = make_app();
+        // Create a DID, then confirm /health sees it.
+        let body = serde_json::json!({ "publicKeyMultibase": "zTestPublicKey" });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/dids")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["documents"], 1);
+    }
+
+    /// `/health` is a static route and must not be swallowed by `/:did`, which
+    /// would otherwise match it and answer 400 for a malformed DID.
+    #[tokio::test]
+    async fn health_is_not_captured_by_the_did_route() {
+        let app = make_app();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "/health must resolve to the health handler, not the DID resolver"
+        );
     }
 
     // ── POST /dids ────────────────────────────────────────────────────────────

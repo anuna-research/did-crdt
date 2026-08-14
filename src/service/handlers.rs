@@ -9,6 +9,7 @@
 //! | GET    | /:did             | [`resolve_did`]  |
 //! | POST   | /dids/:did/deltas | [`submit_delta`] |
 //! | GET    | /metrics          | [`get_metrics`]  |
+//! | GET    | /health           | [`get_health`]   |
 
 use std::time::Instant;
 
@@ -96,6 +97,11 @@ pub async fn create_did(
         .record_delta_accepted(&truncate_did(&did_str), state_bytes);
 
     state.docs.lock().insert(did.clone(), doc);
+
+    // Write the snapshot through to durable storage before announcing, so a
+    // crash between the two loses a broadcast rather than the document.
+    #[cfg(feature = "sync")]
+    persist(&state, &did).await;
 
     // Announce the new DID to peers so they can reconcile (CON-004 step 4).
     #[cfg(feature = "sync")]
@@ -327,6 +333,9 @@ pub async fn submit_delta(
             state
                 .metrics
                 .record_delta_accepted(&truncate_did(&did_str), state_bytes);
+            // Persist the merged state before announcing it (see create_did).
+            #[cfg(feature = "sync")]
+            persist(&state, &did).await;
             // Announce the updated state to peers so they can reconcile (CON-004 step 4).
             #[cfg(feature = "sync")]
             if let Some(node) = &state.live_node {
@@ -367,7 +376,80 @@ pub async fn get_metrics(State(state): State<AppState>) -> String {
     state.metrics.encode()
 }
 
+// ── GET /health ───────────────────────────────────────────────────────────────
+
+/// Liveness/readiness response for `GET /health`.
+#[derive(Debug, Serialize)]
+pub struct HealthResponse {
+    /// Always `"ok"` — reaching the handler at all means the router is serving.
+    pub status: &'static str,
+    /// Documents currently held in memory.
+    pub documents: usize,
+    /// `"durable"` when snapshots are written to `STORAGE_PATH`, `"ephemeral"`
+    /// when the in-memory store is the only copy.
+    pub storage: &'static str,
+    /// Whether the P2P sync layer is running.
+    pub sync: bool,
+}
+
+/// Report service health.
+///
+/// Deliberately cheap and dependency-free: it touches only in-process state, so
+/// it stays a true liveness signal. A check that reached for the DHT or a peer
+/// would report unhealthy — and take the machine out of rotation — whenever a
+/// remote service it does not control had a bad minute.
+pub async fn get_health(State(state): State<AppState>) -> Response {
+    let documents = state.docs.lock().len();
+
+    #[cfg(feature = "sync")]
+    let (storage, sync) = (
+        if state.persistence.is_some() {
+            "durable"
+        } else {
+            "ephemeral"
+        },
+        state.live_node.is_some(),
+    );
+    #[cfg(not(feature = "sync"))]
+    let (storage, sync) = ("ephemeral", false);
+
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            status: "ok",
+            documents,
+            storage,
+            sync,
+        }),
+    )
+        .into_response()
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Write the current snapshot of `did` through to the durable store.
+///
+/// Best-effort and non-fatal, matching how announce and DHT publication are
+/// handled: the document is already committed to the in-memory `DocStore` and
+/// the response reflects that. A failure here is logged and counted so it is
+/// visible in `/metrics` rather than silent.
+///
+/// The lock is taken only to clone the document out — `save` is async and the
+/// `DocStore` mutex must never be held across an await (CON-005).
+#[cfg(feature = "sync")]
+async fn persist(state: &AppState, did: &Did) {
+    let Some(store) = &state.persistence else {
+        return;
+    };
+    let snapshot = { state.docs.lock().get(did).cloned() };
+    let Some(doc) = snapshot else {
+        return;
+    };
+    if let Err(e) = store.save(&doc).await {
+        eprintln!("did-crdt: persisting {did} failed: {e}");
+        state.metrics.record_persist_failure();
+    }
+}
 
 /// Return up to 16 characters of the method-specific ID to use as a metric
 /// label, avoiding unbounded cardinality.

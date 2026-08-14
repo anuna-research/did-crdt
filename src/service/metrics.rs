@@ -8,10 +8,11 @@
 //! - `did_crdt_delta_rejections_total`      — counter, by reason
 //! - `did_crdt_peer_count`                  — gauge
 //! - `did_crdt_state_size_bytes`            — gauge, by did
+//! - `did_crdt_persist_failures_total`      — counter
 
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
 };
 
 /// All prometheus metrics exposed by the did-crdt service.
@@ -46,6 +47,13 @@ pub struct Metrics {
     ///
     /// Labels: `did` (truncated hash)
     pub state_size: IntGaugeVec,
+
+    /// Counter of snapshot writes to durable storage that failed.
+    ///
+    /// Persistence is best-effort — a failure does not fail the request — so
+    /// this counter is the only signal that a node believed to be durable is
+    /// not actually writing through. Alert on any sustained increase.
+    pub persist_failures: IntCounter,
 
     registry: Registry,
 }
@@ -132,6 +140,16 @@ impl Metrics {
             .register(Box::new(state_size.clone()))
             .expect("register");
 
+        // Durable-write failures
+        let persist_failures = IntCounter::new(
+            "did_crdt_persist_failures_total",
+            "Total snapshot writes to durable storage that failed",
+        )
+        .expect("persist_failures metric must be valid");
+        registry
+            .register(Box::new(persist_failures.clone()))
+            .expect("register");
+
         Self {
             convergence_latency,
             resolution_latency,
@@ -139,6 +157,7 @@ impl Metrics {
             delta_rejections,
             peer_count,
             state_size,
+            persist_failures,
             registry,
         }
     }
@@ -183,6 +202,11 @@ impl Metrics {
     pub fn record_delta_rejected(&self, reason: &str) {
         self.deltas_merged.with_label_values(&["rejected"]).inc();
         self.delta_rejections.with_label_values(&[reason]).inc();
+    }
+
+    /// Increment the durable-write failure counter.
+    pub fn record_persist_failure(&self) {
+        self.persist_failures.inc();
     }
 }
 
