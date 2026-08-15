@@ -52,11 +52,27 @@ pub struct ServerConfig {
     pub disable_dht_publish: bool,
 
     /// Total timeout for cold-start DID resolution (DHT lookup + bootstrap).
-    /// Env: `RESOLVE_TIMEOUT_MS`, default: `10_000`.
+    /// Env: `RESOLVE_TIMEOUT_MS`, default: `1_500`.
+    ///
+    /// THE DEFAULT IS SET BY THE CALLER'S DEADLINE, NOT BY OUR PATIENCE.
+    /// Selfsame's resolver client — the one client `did-crdt-service-v1` is
+    /// defined for — gives the whole HTTP request 3,000 ms
+    /// (`selfsame-app-identity-net`, `RESOLVER_DEADLINE`). A resolution that
+    /// takes longer than that is not a slow answer, it is no answer: the caller
+    /// has already recorded a timeout and moved on, so every millisecond spent
+    /// past its deadline is spent on nobody's behalf.
+    ///
+    /// 1,500 ms leaves the rest of that budget for connection setup, TLS and
+    /// transfer. It is deliberately well under, rather than just under, because
+    /// the deadline covers the round trip and we do not know the caller's RTT.
     pub resolve_timeout_ms: u64,
 
     /// DHT lookup sub-timeout in milliseconds.
-    /// Env: `DHT_LOOKUP_TIMEOUT_MS`, default: `5_000`.
+    /// Env: `DHT_LOOKUP_TIMEOUT_MS`, default: `1_000`.
+    ///
+    /// Kept strictly below `resolve_timeout_ms` so the two are coherent: a sub-
+    /// timeout longer than the total it sits inside can never be the thing that
+    /// fires, which makes it a number that looks like a control and is not one.
     pub dht_lookup_timeout_ms: u64,
 
     /// Opt this node into bootstrapping every DID announced on the gossip
@@ -76,8 +92,8 @@ impl Default for ServerConfig {
             // a service-only build (no "sync" feature).
             dht_relay_url: "https://relay.pkarr.org".to_owned(),
             disable_dht_publish: false,
-            resolve_timeout_ms: 10_000,
-            dht_lookup_timeout_ms: 5_000,
+            resolve_timeout_ms: 1_500,
+            dht_lookup_timeout_ms: 1_000,
             replicate_all: false,
         }
     }
@@ -104,7 +120,8 @@ pub struct AppState {
     pub persistence: Option<Arc<crate::sync::store::FsBlobStore>>,
     /// Prometheus metrics.
     pub metrics: Arc<Metrics>,
-    /// Total timeout for cold-start DID resolution.
+    /// Total timeout for cold-start DID resolution. See
+    /// [`ServerConfig::resolve_timeout_ms`] for why the default is what it is.
     pub resolve_timeout: Duration,
 }
 
@@ -120,7 +137,7 @@ impl AppState {
             #[cfg(feature = "sync")]
             persistence: None,
             metrics: Arc::new(Metrics::new()),
-            resolve_timeout: Duration::from_millis(10_000),
+            resolve_timeout: Duration::from_millis(1_500),
         }
     }
 }
@@ -420,6 +437,59 @@ mod tests {
 
     fn make_app() -> Router {
         build_router(AppState::new())
+    }
+
+    // ── Timeout defaults ──────────────────────────────────────────────────────
+
+    /// The deadline `did-crdt-service-v1`'s only defined client gives the whole
+    /// HTTP request: `selfsame-app-identity-net`'s `RESOLVER_DEADLINE`.
+    const SELFSAME_RESOLVER_DEADLINE_MS: u64 = 3_000;
+
+    /// A resolution slower than the caller's deadline is not a slow answer, it
+    /// is no answer — the caller has recorded a timeout and moved on. This is
+    /// asserted against the client's constant rather than against `1_500`, so
+    /// the test states the invariant instead of restating the default.
+    #[test]
+    fn cold_start_resolution_finishes_inside_the_clients_deadline() {
+        let config = ServerConfig::default();
+        assert!(
+            config.resolve_timeout_ms < SELFSAME_RESOLVER_DEADLINE_MS,
+            "resolve_timeout_ms {} must be under the client's {} ms deadline",
+            config.resolve_timeout_ms,
+            SELFSAME_RESOLVER_DEADLINE_MS,
+        );
+        // Room for connection setup, TLS and transfer: the client's deadline
+        // covers the round trip, and this service does not know the caller's
+        // RTT. Half the budget is the crude, defensible split.
+        assert!(
+            config.resolve_timeout_ms <= SELFSAME_RESOLVER_DEADLINE_MS / 2,
+            "resolve_timeout_ms {} leaves too little of the {} ms budget for the round trip",
+            config.resolve_timeout_ms,
+            SELFSAME_RESOLVER_DEADLINE_MS,
+        );
+    }
+
+    /// A sub-timeout longer than the total it sits inside can never fire, which
+    /// makes it a number that looks like a control and is not one.
+    #[test]
+    fn the_dht_sub_timeout_can_actually_fire() {
+        let config = ServerConfig::default();
+        assert!(
+            config.dht_lookup_timeout_ms < config.resolve_timeout_ms,
+            "dht_lookup_timeout_ms {} must be under resolve_timeout_ms {}",
+            config.dht_lookup_timeout_ms,
+            config.resolve_timeout_ms,
+        );
+    }
+
+    /// `AppState::new()` is used by callers that never build a `ServerConfig`,
+    /// so its default has to agree — they drifted apart before this test.
+    #[test]
+    fn the_two_defaults_agree() {
+        assert_eq!(
+            AppState::new().resolve_timeout,
+            Duration::from_millis(ServerConfig::default().resolve_timeout_ms),
+        );
     }
 
     // ── GET /metrics ──────────────────────────────────────────────────────────
