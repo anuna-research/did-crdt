@@ -9,8 +9,8 @@
 //! | `STORAGE_PATH`         | *(in-memory)*              | Directory for the persistent iroh-blobs store. Snapshots are written on every accepted change and reloaded at startup; unset means state is lost on exit. Startup fails if the path cannot be opened. |
 //! | `DHT_RELAY_URL`        | `https://relay.pkarr.org`  | pkarr HTTP relay for peer discovery      |
 //! | `DISABLE_DHT_PUBLISH`  | *(unset)*                  | Set to `true` to opt out of DHT          |
-//! | `RESOLVE_TIMEOUT_MS`   | `10000`                    | Cold-start resolution total timeout (ms) |
-//! | `DHT_LOOKUP_TIMEOUT_MS`| `5000`                     | pkarr lookup sub-timeout (ms)            |
+//! | `RESOLVE_TIMEOUT_MS`   | `1500`                     | Cold-start resolution total timeout (ms). Kept under the 3,000 ms deadline Selfsame's resolver client gives the whole request; a resolution finishing after that is one nobody is still waiting for. |
+//! | `DHT_LOOKUP_TIMEOUT_MS`| `1000`                     | pkarr lookup sub-timeout (ms). Strictly below the total above, so it can actually fire. |
 //! | `REPLICATE_ALL`        | *(unset)*                  | Set to `true` to bootstrap every DID announced on the mesh (full-replica mode; accepts unbounded storage growth) |
 
 use std::net::SocketAddr;
