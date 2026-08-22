@@ -158,7 +158,9 @@ pub fn build_router(state: AppState) -> Router {
             Router::new()
                 .route(
                     "/rendezvous/:slot",
-                    get(super::rendezvous::get_slot).put(super::rendezvous::put_slot),
+                    get(super::rendezvous::get_slot)
+                        .put(super::rendezvous::put_slot)
+                        .options(super::rendezvous::preflight_slot),
                 )
                 .with_state(super::rendezvous::Mailbox::new()),
         )

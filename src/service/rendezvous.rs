@@ -36,6 +36,30 @@ use std::sync::{Arc, Mutex};
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+
+// The rendezvous is a cross-origin write target: a browser at an application's
+// origin (e.g. chat.anuna.io) PUTs the sealed offer here. The mailbox is a blind
+// carrier of opaque single-write/read-once ciphertext — CORS is not what
+// protects a slot (the AEAD is), and the addresses are unguessable — so a
+// permissive policy is correct and necessary. Every response carries it, and a
+// preflight OPTIONS is answered directly.
+fn cors_headers() -> [(axum::http::HeaderName, &'static str); 3] {
+    use axum::http::header::{
+        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+    };
+    [
+        (ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        (ACCESS_CONTROL_ALLOW_METHODS, "GET, PUT, OPTIONS"),
+        (ACCESS_CONTROL_ALLOW_HEADERS, "content-type"),
+    ]
+}
+
+/// `OPTIONS /rendezvous/{slot}` — CORS preflight, answered directly so a
+/// cross-origin PUT is not blocked before it reaches [`put_slot`].
+pub async fn preflight_slot() -> Response {
+    (StatusCode::NO_CONTENT, cors_headers()).into_response()
+}
 
 /// Maximum accepted rendezvous body (CON-002).
 pub const MAX_SLOT_BYTES: usize = 4096;
@@ -90,34 +114,30 @@ pub async fn put_slot(
     State(mailbox): State<Mailbox>,
     Path(slot): Path<String>,
     body: Bytes,
-) -> StatusCode {
-    if !is_well_formed_slot(&slot) || body.is_empty() || body.len() > MAX_SLOT_BYTES {
-        return StatusCode::BAD_REQUEST;
-    }
-    let now = now_seconds();
-    let mut slots = mailbox.inner.lock().unwrap_or_else(|p| p.into_inner());
-    Mailbox::sweep(&mut slots, now);
-    if slots.contains_key(&slot) {
-        return StatusCode::CONFLICT;
-    }
-    slots.insert(
-        slot,
-        Slot {
-            ciphertext: body.to_vec(),
-            stored_at: now,
-            read: false,
-        },
-    );
-    StatusCode::CREATED
+) -> Response {
+    let status = if !is_well_formed_slot(&slot) || body.is_empty() || body.len() > MAX_SLOT_BYTES {
+        StatusCode::BAD_REQUEST
+    } else {
+        let now = now_seconds();
+        let mut slots = mailbox.inner.lock().unwrap_or_else(|p| p.into_inner());
+        Mailbox::sweep(&mut slots, now);
+        if slots.contains_key(&slot) {
+            StatusCode::CONFLICT
+        } else {
+            slots.insert(slot, Slot { ciphertext: body.to_vec(), stored_at: now, read: false });
+            StatusCode::CREATED
+        }
+    };
+    (status, cors_headers()).into_response()
 }
 
 /// `GET /rendezvous/{slot}` — read-once, 200 | 404.
 pub async fn get_slot(
     State(mailbox): State<Mailbox>,
     Path(slot): Path<String>,
-) -> Result<Vec<u8>, StatusCode> {
+) -> Response {
     if !is_well_formed_slot(&slot) {
-        return Err(StatusCode::NOT_FOUND);
+        return (StatusCode::NOT_FOUND, cors_headers()).into_response();
     }
     let now = now_seconds();
     let mut slots = mailbox.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -125,9 +145,9 @@ pub async fn get_slot(
     match slots.get_mut(&slot) {
         Some(entry) if !entry.read => {
             entry.read = true;
-            Ok(entry.ciphertext.clone())
+            (StatusCode::OK, cors_headers(), entry.ciphertext.clone()).into_response()
         }
-        _ => Err(StatusCode::NOT_FOUND),
+        _ => (StatusCode::NOT_FOUND, cors_headers()).into_response(),
     }
 }
 
