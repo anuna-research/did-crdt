@@ -148,7 +148,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/:did", get(handlers::resolve_did))
         // Delta submission
         .route("/dids/:did/deltas", post(handlers::submit_delta))
+        // selfsame SPEC-001 §6.12 places these on this service: the
+        // signed-delta closure and the blind rendezvous mailbox. The mailbox
+        // carries its own state — it holds ciphertext and slot addresses,
+        // never documents — so it is merged with a separate state type.
+        .route("/dids/:did/closure", get(handlers::get_closure))
         .with_state(state)
+        .merge(
+            Router::new()
+                .route(
+                    "/rendezvous/:slot",
+                    get(super::rendezvous::get_slot).put(super::rendezvous::put_slot),
+                )
+                .with_state(super::rendezvous::Mailbox::new()),
+        )
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────

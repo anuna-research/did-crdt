@@ -457,3 +457,36 @@ fn truncate_did(did_str: &str) -> String {
     let id = did_str.strip_prefix("did:crdt:").unwrap_or(did_str);
     id.chars().take(16).collect()
 }
+
+// ── selfsame SPEC-001 CON-005: signed-closure resolution ─────────────────────
+
+/// `GET /dids/{did}/closure` — 200 | 404 | 410.
+///
+/// **Signed deltas, not a resolved document.** A resolved document carries no
+/// signatures, so a verifier consuming one would be trusting this resolver's
+/// authorisation decisions; the closure route hands back the signed deltas so
+/// the verifier applies its own trust rules (selfsame SPEC-001 REQ-025, and
+/// the same property `?includeClosure=true` gives resolution). `410 Gone`
+/// answers a deactivated DID — a reason to refuse outright, not to go looking
+/// for a more agreeable account of its state.
+pub async fn get_closure(State(state): State<AppState>, Path(did_str): Path<String>) -> Response {
+    let did: Did = match did_str.parse() {
+        Ok(d) => d,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let guard = state.docs.lock();
+    let Some(doc) = guard.get(&did) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if doc.is_deactivated() {
+        return StatusCode::GONE.into_response();
+    }
+    match doc.closure_bundle() {
+        Ok(bundle) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "did": did_str, "deltas": bundle.deltas })),
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
