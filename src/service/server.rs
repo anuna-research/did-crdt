@@ -162,6 +162,13 @@ pub fn build_router(state: AppState) -> Router {
                         .put(super::rendezvous::put_slot)
                         .options(super::rendezvous::preflight_slot),
                 )
+                // Refuse an oversized body before it is buffered (codex review,
+                // "request/body limits before full buffering"): the handler's
+                // own `MAX_SLOT_BYTES` check runs only after `Bytes` has
+                // collected the whole request, so this caps what is read.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    super::rendezvous::MAX_SLOT_BYTES,
+                ))
                 .with_state(super::rendezvous::Mailbox::new()),
         )
 }

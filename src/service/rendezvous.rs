@@ -30,7 +30,7 @@
 // persistence layer only if operational evidence shows restarts eating live
 // ceremonies (trace: selfsame SPEC-001 CON-002).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
@@ -67,6 +67,17 @@ pub const MAX_SLOT_BYTES: usize = 4096;
 /// Slot lifetime in seconds (CON-002).
 pub const SLOT_TTL_SECONDS: u64 = 600;
 
+/// Maximum slots held at once.
+///
+/// A DoS bound, not a semantic one (codex review, "unbounded, quadratic-cost
+/// write service"): without it a hostile writer streams fresh slots and holds
+/// `4 KiB * N` for the whole TTL while every request paid an O(N) scan. At the
+/// TTL and body cap this ceiling bounds live storage to roughly 256 MiB, and a
+/// PUT beyond it is refused rather than allowed to grow the map without end.
+/// The rendezvous shares a process with the DID resolver, so the bound protects
+/// that too.
+pub const MAX_SLOTS: usize = 65_536;
+
 /// A stored mailbox entry.
 struct Slot {
     ciphertext: Vec<u8>,
@@ -75,9 +86,21 @@ struct Slot {
 }
 
 /// The mailbox store. Deliberately holds no key material of any kind.
+///
+/// Expiry is amortised O(1): `order` records slot names in insertion order,
+/// which — because the TTL is fixed — is also expiry order, so a request drains
+/// only the entries that have actually lapsed from the front rather than
+/// scanning the whole map (the previous `retain`, which made filling `N` slots
+/// cost O(N^2)). Each name is enqueued once and dequeued once.
 #[derive(Clone, Default)]
 pub struct Mailbox {
-    inner: Arc<Mutex<HashMap<String, Slot>>>,
+    inner: Arc<Mutex<Store>>,
+}
+
+#[derive(Default)]
+struct Store {
+    slots: HashMap<String, Slot>,
+    order: VecDeque<(String, u64)>,
 }
 
 impl Mailbox {
@@ -86,8 +109,25 @@ impl Mailbox {
         Self::default()
     }
 
-    fn sweep(slots: &mut HashMap<String, Slot>, now: u64) {
-        slots.retain(|_, s| now.saturating_sub(s.stored_at) < SLOT_TTL_SECONDS);
+    /// Drop lapsed slots from the front of the insertion queue. Amortised O(1):
+    /// each slot is removed at most once, when its TTL is first found expired.
+    fn expire(store: &mut Store, now: u64) {
+        while let Some((slot, stored_at)) = store.order.front() {
+            if now.saturating_sub(*stored_at) < SLOT_TTL_SECONDS {
+                break;
+            }
+            // Only remove the map entry if it is still the one this queue record
+            // refers to (a slot freed and rewritten after expiry would appear
+            // twice in the queue with different timestamps).
+            if store
+                .slots
+                .get(slot)
+                .is_some_and(|s| s.stored_at == *stored_at)
+            {
+                store.slots.remove(slot);
+            }
+            store.order.pop_front();
+        }
     }
 }
 
@@ -119,12 +159,20 @@ pub async fn put_slot(
         StatusCode::BAD_REQUEST
     } else {
         let now = now_seconds();
-        let mut slots = mailbox.inner.lock().unwrap_or_else(|p| p.into_inner());
-        Mailbox::sweep(&mut slots, now);
-        if slots.contains_key(&slot) {
+        let mut store = mailbox.inner.lock().unwrap_or_else(|p| p.into_inner());
+        Mailbox::expire(&mut store, now);
+        if store.slots.contains_key(&slot) {
             StatusCode::CONFLICT
+        } else if store.slots.len() >= MAX_SLOTS {
+            // The store is full of unexpired slots. Refuse rather than grow
+            // without bound; carries no diagnostic, like every other refusal.
+            StatusCode::INSUFFICIENT_STORAGE
         } else {
-            slots.insert(slot, Slot { ciphertext: body.to_vec(), stored_at: now, read: false });
+            store.slots.insert(
+                slot.clone(),
+                Slot { ciphertext: body.to_vec(), stored_at: now, read: false },
+            );
+            store.order.push_back((slot, now));
             StatusCode::CREATED
         }
     };
@@ -140,9 +188,9 @@ pub async fn get_slot(
         return (StatusCode::NOT_FOUND, cors_headers()).into_response();
     }
     let now = now_seconds();
-    let mut slots = mailbox.inner.lock().unwrap_or_else(|p| p.into_inner());
-    Mailbox::sweep(&mut slots, now);
-    match slots.get_mut(&slot) {
+    let mut store = mailbox.inner.lock().unwrap_or_else(|p| p.into_inner());
+    Mailbox::expire(&mut store, now);
+    match store.slots.get_mut(&slot) {
         Some(entry) if !entry.read => {
             entry.read = true;
             (StatusCode::OK, cors_headers(), entry.ciphertext.clone()).into_response()
@@ -167,16 +215,38 @@ mod tests {
         assert!(!is_well_formed_slot(""));
     }
 
+    fn store_with_slot(name: &str, stored_at: u64) -> Store {
+        let mut store = Store::default();
+        store
+            .slots
+            .insert(name.to_owned(), Slot { ciphertext: vec![1], stored_at, read: false });
+        store.order.push_back((name.to_owned(), stored_at));
+        store
+    }
+
     #[test]
-    fn the_sweep_honours_the_lifetime() {
-        let mut slots = HashMap::new();
-        slots.insert(
-            "a".repeat(26),
-            Slot { ciphertext: vec![1], stored_at: 0, read: false },
-        );
-        Mailbox::sweep(&mut slots, SLOT_TTL_SECONDS - 1);
-        assert_eq!(slots.len(), 1, "inside the lifetime the slot survives");
-        Mailbox::sweep(&mut slots, SLOT_TTL_SECONDS);
-        assert!(slots.is_empty(), "at the lifetime the slot is gone");
+    fn expiry_honours_the_lifetime() {
+        let name = "a".repeat(26);
+        let mut store = store_with_slot(&name, 0);
+        Mailbox::expire(&mut store, SLOT_TTL_SECONDS - 1);
+        assert_eq!(store.slots.len(), 1, "inside the lifetime the slot survives");
+        Mailbox::expire(&mut store, SLOT_TTL_SECONDS);
+        assert!(store.slots.is_empty(), "at the lifetime the slot is gone");
+        assert!(store.order.is_empty(), "and its queue record is drained");
+    }
+
+    #[test]
+    fn expiry_stops_at_the_first_live_slot() {
+        // Insertion order is expiry order, so a live slot at the front halts the
+        // drain before it reaches later slots — the amortised-O(1) property.
+        let mut store = store_with_slot(&"a".repeat(26), 0);
+        store
+            .slots
+            .insert("b".repeat(26), Slot { ciphertext: vec![2], stored_at: SLOT_TTL_SECONDS, read: false });
+        store.order.push_back(("b".repeat(26), SLOT_TTL_SECONDS));
+        // now: 'a' (stored 0) is lapsed, 'b' (stored TTL) is not.
+        Mailbox::expire(&mut store, SLOT_TTL_SECONDS + 1);
+        assert!(!store.slots.contains_key(&"a".repeat(26)), "the lapsed slot is gone");
+        assert!(store.slots.contains_key(&"b".repeat(26)), "the live slot survives");
     }
 }
